@@ -15,69 +15,106 @@ function App() {
   const canvasRef = useRef(document.createElement('canvas'));
   const [videoPath, setVideoPath] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
-
   const [mediaItems, setMediaItems] = useState([]);
-
   const [hoveredScreenshot, setHoveredScreenshot] = useState(null);
-
   const [showItemName, setShowItemName] = useState(false);
- 
+  const [playOnHover, setPlayOnHover] = useState(false);
+  const [isMuted, setIsMuted] = useState(true); // New state for audio toggle
+
+  const [screenshotsPerRow, setScreenshotsPerRow] = useState(4);
+  const minScreenshotsPerRow = 1;
+  const maxScreenshotsPerRow = 10;
+
+ useEffect(() => {
+    const handleWheel = (e) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        setScreenshotsPerRow(prev => {
+          let newVal = prev;
+          if (e.deltaY < 0 && prev < 10) newVal = prev + 1;
+          if (e.deltaY > 0 && prev > 1) newVal = prev - 1;
+          return newVal;
+        });
+      }
+    };
+
+    window.addEventListener('wheel', handleWheel, { passive: false });
+    return () => window.removeEventListener('wheel', handleWheel);
+  }, []);
 
   useEffect(() => {
     const loadMediaItems = async () => {
       const items = await window.electronAPI.getMediaItems();
       const folder = await window.electronAPI.getScreenshotFolder();
-
-      // Read directory contents from main process instead of using Node.js fs here
       const enrichedItems = await Promise.all(
         items.map(async (item) => {
-          const screenshots = await window.electronAPI.readScreenshots(folder, item.name);
+          const screenshots = await window.electronAPI.readScreenshots(folder, item.name, 100);
           return {
             ...item,
-            screenshots: screenshots.map(name => `${folder}/${name}`)
+            screenshots: screenshots.slice(0, 100).map(name => `${folder}/${name}`)
+            
           };
         })
       );
-
       setMediaItems(enrichedItems);
     };
-
     loadMediaItems();
   }, []);
 
-    useEffect(() => {
+  useEffect(() => {
     window.electronAPI.onVideoSelected(async (path) => {
       setVideoPath(path);
       const folder = await window.electronAPI.getScreenshotFolder(path);
       const name = path.split(/[\\/]/).pop();
-      const images = await window.electronAPI.readScreenshots(folder, name);
+      const images = await window.electronAPI.readScreenshots(folder, name, 100);
       setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
     });
   }, []);
 
+  const addToDatabase = async () => {
+    if (!videoPath) return;
+    const name = videoPath.split(/[\\/]/).pop();
+    await window.electronAPI.addMediaItem({ name, fileName: videoPath });
+    alert('Media item added to database!');
+  };
 
-
-const addToDatabase = async () => {
-  if (!videoPath) return;
-  const name = videoPath.split(/[\\/]/).pop();
-  await window.electronAPI.addMediaItem({ name, fileName: videoPath });
-  alert('Media item added to database!');
-};
-
-const openMediaFile = (path) => {
-  setVideoPath(path);
-};
-
- useEffect(() => {
-  window.electronAPI.onVideoSelected((path) => {
+  const openMediaFile = (path) => {
     setVideoPath(path);
-  });
-}, []);
+  };
 
-const handleOpen = () => {
-  window.electronAPI.openVideoDialog();
+  useEffect(() => {
+    window.electronAPI.onVideoSelected((path) => {
+      setVideoPath(path);
+    });
+  }, []);
+
+  const handleOpen = () => {
+    window.electronAPI.openVideoDialog();
+  };
+
+  const stepBack = () => {
+  const video = videoRef.current;
+  if (video) {
+    const frameDuration = 1 / 30; // assuming 30fps
+    video.currentTime = Math.max(0, video.currentTime - frameDuration);
+  }
 };
 
+const stepForward = () => {
+  const video = videoRef.current;
+  if (video) {
+    const frameDuration = 1 / 30; // assuming 30fps
+    video.currentTime = Math.min(video.duration, video.currentTime + frameDuration);
+  }
+};
+
+const toggleMute = () => {
+  const video = videoRef.current;
+  if (video) {
+    video.muted = !video.muted;
+    setIsMuted(video.muted);
+  }
+};
 
 
   const takeScreenshot = async () => {
@@ -91,104 +128,129 @@ const handleOpen = () => {
     ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
     const timestamp = formatTime(video.currentTime);
-    const name = `${videoPath.split(/[\\/]/).pop().split('.')[0]}_${timestamp}.png`;
-    const buffer = canvasRef.current.toDataURL('image/png');
+    const name = `${videoPath.split(/[\\/]/).pop().split('.')[0]}_${timestamp}.jpeg`;
+    const buffer = canvasRef.current.toDataURL('image/jpeg', 0.85); // JPEG encoding
 
     const filePath = `${folder}/${name}`;
-
     await window.electronAPI.saveScreenshot(filePath, buffer);
     setScreenshots((prev) => [...prev, { name, path: filePath }]);
-    };
+  };
 
   const seekToScreenshot = (filename) => {
-    const parts = filename.split('_').pop().replace('.png', '').split('-');
+    const parts = filename.split('_').pop().replace('.jpeg', '').split('-');
     const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
     videoRef.current.currentTime = seconds;
     videoRef.current.play();
   };
 
-    const getTimeFromFilename = (filename) => {
-    const parts = filename.split('_').pop().replace('.png', '').split('-');
+  const getTimeFromFilename = (filename) => {
+    const parts = filename.split('_').pop().replace('.jpeg', '').split('-');
     return (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
   };
 
+  useEffect(() => {
+  const handleContextMenu = (e) => {
+    e.preventDefault();
+    window.electronAPI.showContextMenu();
+  };
+
+  window.addEventListener('contextmenu', handleContextMenu);
+  
+  return () => {
+    window.removeEventListener('contextmenu', handleContextMenu);
+  };
+}, []);
+
+useEffect(() => {
+  window.electronAPI.onContextCommand((command) => {
+    if (command === 'enable-hover') {
+      // Enable hover logic
+      setPlayOnHover(true);
+    } else if (command === 'disable-hover') {
+      setPlayOnHover(false);
+      // Disable hover logic
+    } else if (command === 'open-settings') {
+      // Open settings logic
+    }
+  });
+}, []);
+
+
   return (
     <div style={{ padding: 2 }}>
-   {mediaItems.length > 0 && (
-  <>
-    {mediaItems.map((item, idx) => (
-      <div key={idx} style={{ border: '1px solid #ccc', margin: 0, padding: 0 }}>
-        { showItemName && (
-        <h4
-          style={{ cursor: 'pointer' }}
-          onClick={async () => {
-                  setVideoPath(item.file_name);
-                  const folder = await window.electronAPI.getScreenshotFolder(item.file_name);
-                  const name = item.file_name.split(/[\\/]/).pop();
-                  const images = await window.electronAPI.readScreenshots(folder, name);
-                  setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
-                }}
-          
-        >
-          {item.name}
-        </h4>
-        )}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
-          {item.screenshots.map((img, i) => {
-            const parts = img.split('_').pop().replace('.png', '').split('-');
-            const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
-            return (
-              <div
-                key={i}
-                style={{ flex: '1 0 auto', height: 'auto', maxWidth: 'calc(100% / 6)', objectFit: 'contain', cursor: 'pointer' }}
-                onMouseEnter={() => setHoveredScreenshot({ video: item.file_name, time: seconds, index: `${idx}-${i}` })}
-                onMouseLeave={() => setHoveredScreenshot(null)}
-                                    onClick={async () => {
-                      const parts = img.split('_').pop().replace('.png', '').split('-');
-                      const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
-                      setVideoPath(item.file_name);
-                      const folder = await window.electronAPI.getScreenshotFolder(item.file_name);
-                      const name = item.file_name.split(/[\\/]/).pop();
-                      const images = await window.electronAPI.readScreenshots(folder, name);
-                      setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
-                      setTimeout(() => {
-                        if (videoRef.current) {
-                          videoRef.current.currentTime = seconds;
-                          videoRef.current.play();
-                        }
-                      }, 100);
-                    }}
-              >
-                {hoveredScreenshot?.index === `${idx}-${i}` ? (
-                  <video
-                    src={`file://${item.file_name}`}
-                    style={{ width: '100%', height: '100%' }}
-                    autoPlay
-                    muted
-                    loop
-                    onLoadedMetadata={(e) => {
-                      e.currentTarget.currentTime = seconds;
-                    }}
-                  />
-                ) : (
-                  <img
-                    src={`file://${img}`}
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
-                    alt={`screenshot-${i}`}
-
-                  />
-                )}
+      {mediaItems.length > 0 && (
+        <>
+          {mediaItems.map((item, idx) => (
+            <div key={idx} style={{ border: '1px solid #ccc', margin: 0, padding: 0 }}>
+              {showItemName && (
+                <h4
+                  style={{ cursor: 'pointer' }}
+                  onClick={async () => {
+                    setVideoPath(item.file_name);
+                    const folder = await window.electronAPI.getScreenshotFolder(item.file_name);
+                    const name = item.file_name.split(/[\\/]/).pop();
+                    const images = await window.electronAPI.readScreenshots(folder, name, 100);
+                    setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
+                  }}
+                >
+                  {item.name}
+                </h4>
+              )}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
+                {item.screenshots.map((img, i) => {
+                  const parts = img.split('_').pop().replace('.jpeg', '').split('-');
+                  const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
+                  return (
+                    <div
+                      key={i}
+                      style={{ flex: '1 0 auto', height: 'auto', maxWidth: `calc(100% / ${screenshotsPerRow})`, objectFit: 'contain', cursor: 'pointer' }}
+                      onMouseEnter={() => setHoveredScreenshot({ video: item.file_name, time: seconds, index: `${idx}-${i}` })}
+                      onMouseLeave={() => setHoveredScreenshot(null)}
+                      onClick={async () => {
+                        setVideoPath(item.file_name);
+                        const folder = await window.electronAPI.getScreenshotFolder(item.file_name);
+                        const name = item.file_name.split(/[\\/]/).pop();
+                        const images = await window.electronAPI.readScreenshots(folder, name, 1000);
+                        setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
+                        setTimeout(() => {
+                          if (videoRef.current) {
+                            videoRef.current.currentTime = seconds;
+                            videoRef.current.play();
+                          }
+                        }, 100);
+                      }}
+                    >
+                      {( playOnHover && hoveredScreenshot?.index === `${idx}-${i}`) ? (
+                        <video
+                          src={`file://${item.file_name}`}
+                          style={{ width: '100%', height: '100%' }}
+                          autoPlay
+                          muted
+                          loop
+                          onLoadedMetadata={(e) => {
+                            e.currentTarget.currentTime = seconds;
+                          }}
+                        />
+                      ) : (
+                        <img
+                          src={`file://${img}`}
+                          style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+                          alt={`screenshot-${i}`}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
-        </div>
-      </div>
-    ))}
-  </>
-)}
+            </div>
+          ))}
+        </>
+      )}
 
       <button onClick={handleOpen}>Open Video</button>
       <button onClick={() => window.electronAPI.selectScreenshotFolder()}>Set Screenshot Folder</button>
+ 
+
 
       {videoPath && (
         <>
@@ -196,10 +258,18 @@ const handleOpen = () => {
             ref={videoRef}
             src={`file://${videoPath}`}
             controls
+            muted={isMuted}
             style={{ width: '100%', marginTop: 20 }}
           />
           <button onClick={takeScreenshot}>📸 Take Screenshot</button>
           <button onClick={addToDatabase}>➕ Add to Database</button>
+               <div style={{ marginTop: 10 }}>
+  <button onClick={stepBack}>&lt;</button>
+  <button onClick={stepForward}>&gt;</button>
+  <button onClick={toggleMute}>
+    {isMuted ? '🔇 Unmute' : '🔊 Mute'}
+  </button>
+</div>
 
           <div style={{ marginTop: 20 }}>
             <h3>Screenshots</h3>

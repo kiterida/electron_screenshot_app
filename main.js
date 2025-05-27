@@ -1,6 +1,9 @@
 // main.js
+const { convertPngToJpegInDirectory } = require('./convertScreenshotsToJpeg');
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
+
 const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
@@ -58,6 +61,7 @@ ipcMain.handle('get-screenshot-folder', async (event, videoPath) => {
     fs.mkdirSync(fallback, { recursive: true });
     folder = fallback;
   }
+  
   return folder;
 });
 
@@ -92,14 +96,47 @@ ipcMain.handle('get-media-items', async () => {
   return db.prepare('SELECT * FROM media_items').all();
 });
 
-ipcMain.handle('read-screenshots', async (event, folder, name) => {
+ipcMain.handle('read-screenshots', async (event, folder, name, imageCount) => {
   if (!fs.existsSync(folder)) return [];
   const all = fs.readdirSync(folder);
   return all
-    .filter(f => f.startsWith(name.split('.')[0]) && f.endsWith('.png'))
+    .filter(f => f.startsWith(name.split('.')[0]) && /\.(png|jpe?g)$/.test(f))
     .sort()
-    .slice(0, 6); // first 6 screenshots
+    .slice(0, imageCount); // first 6 screenshots
 });
+
+ipcMain.on('show-context-menu', (event) => {
+  const template = [
+    {
+      label: 'Play on Hover',
+      submenu: [
+        {
+          label: 'Enable',
+          click: () => {
+            event.sender.send('context-menu-command', 'enable-hover');
+          }
+        },
+        {
+          label: 'Disable',
+          click: () => {
+            event.sender.send('context-menu-command', 'disable-hover');
+          }
+        }
+      ]
+    },
+    { type: 'separator' },
+    {
+      label: 'Settings',
+      click: () => {
+        event.sender.send('context-menu-command', 'open-settings');
+      }
+    }
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  menu.popup(BrowserWindow.fromWebContents(event.sender));
+});
+
 
 
 app.whenReady().then(() => {
