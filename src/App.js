@@ -17,6 +17,8 @@ function App() {
   const [screenshots, setScreenshots] = useState([]);
 
   const [mediaItems, setMediaItems] = useState([]);
+
+  const [hoveredScreenshot, setHoveredScreenshot] = useState(null);
  
 
   useEffect(() => {
@@ -103,34 +105,83 @@ const handleOpen = () => {
     videoRef.current.play();
   };
 
+    const getTimeFromFilename = (filename) => {
+    const parts = filename.split('_').pop().replace('.png', '').split('-');
+    return (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
+  };
+
   return (
-    <div style={{ padding: 20 }}>
-      <h1>Video Screenshot Tool</h1>
-      {mediaItems.length > 0 && (
-        <>
-          <h2>Saved Media Items</h2>
-          {mediaItems.map((item, idx) => (
-            <div key={idx} style={{ border: '1px solid #ccc', margin: 10, padding: 10 }}>
-              <h4
-                style={{ cursor: 'pointer' }}
-                onClick={() => setVideoPath(item.file_name)}
+    <div style={{ padding: 2 }}>
+   {mediaItems.length > 0 && (
+  <>
+    {mediaItems.map((item, idx) => (
+      <div key={idx} style={{ border: '1px solid #ccc', margin: 10, padding: 10 }}>
+        <h4
+          style={{ cursor: 'pointer' }}
+          onClick={async () => {
+                  setVideoPath(item.file_name);
+                  const folder = await window.electronAPI.getScreenshotFolder(item.file_name);
+                  const name = item.file_name.split(/[\\/]/).pop();
+                  const images = await window.electronAPI.readScreenshots(folder, name);
+                  setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
+                }}
+          
+        >
+          {item.name}
+        </h4>
+        <div style={{ display: 'flex', gap: 5 }}>
+          {item.screenshots.map((img, i) => {
+            const parts = img.split('_').pop().replace('.png', '').split('-');
+            const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
+            return (
+              <div
+                key={i}
+                style={{ position: 'relative', width: 100, height: 56 }}
+                onMouseEnter={() => setHoveredScreenshot({ video: item.file_name, time: seconds, index: `${idx}-${i}` })}
+                onMouseLeave={() => setHoveredScreenshot(null)}
+                                    onClick={async () => {
+                      const parts = img.split('_').pop().replace('.png', '').split('-');
+                      const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
+                      setVideoPath(item.file_name);
+                      const folder = await window.electronAPI.getScreenshotFolder(item.file_name);
+                      const name = item.file_name.split(/[\\/]/).pop();
+                      const images = await window.electronAPI.readScreenshots(folder, name);
+                      setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
+                      setTimeout(() => {
+                        if (videoRef.current) {
+                          videoRef.current.currentTime = seconds;
+                          videoRef.current.play();
+                        }
+                      }, 100);
+                    }}
               >
-                {item.name}
-              </h4>
-              <div style={{ display: 'flex', gap: 5 }}>
-                {item.screenshots.map((img, i) => (
-                  <img
-                    key={i}
-                    src={`file://${img}`}
-                    style={{ width: 100 }}
-                    alt={`screenshot-${i}`}
+                {hoveredScreenshot?.index === `${idx}-${i}` ? (
+                  <video
+                    src={`file://${item.file_name}`}
+                    style={{ width: '100%', height: '100%' }}
+                    autoPlay
+                    muted
+                    loop
+                    onLoadedMetadata={(e) => {
+                      e.currentTarget.currentTime = seconds;
+                    }}
                   />
-                ))}
+                ) : (
+                  <img
+                    src={`file://${img}`}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+                    alt={`screenshot-${i}`}
+
+                  />
+                )}
               </div>
-            </div>
-          ))}
-        </>
-      )}
+            );
+          })}
+        </div>
+      </div>
+    ))}
+  </>
+)}
 
       <button onClick={handleOpen}>Open Video</button>
       <button onClick={() => window.electronAPI.selectScreenshotFolder()}>Set Screenshot Folder</button>
