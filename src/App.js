@@ -19,6 +19,8 @@ function App() {
   const [mediaItems, setMediaItems] = useState([]);
 
   const [hoveredScreenshot, setHoveredScreenshot] = useState(null);
+
+  const [showItemName, setShowItemName] = useState(false);
  
 
   useEffect(() => {
@@ -115,7 +117,8 @@ const handleOpen = () => {
    {mediaItems.length > 0 && (
   <>
     {mediaItems.map((item, idx) => (
-      <div key={idx} style={{ border: '1px solid #ccc', margin: 10, padding: 10 }}>
+      <div key={idx} style={{ border: '1px solid #ccc', margin: 0, padding: 0 }}>
+        { showItemName && (
         <h4
           style={{ cursor: 'pointer' }}
           onClick={async () => {
@@ -129,14 +132,15 @@ const handleOpen = () => {
         >
           {item.name}
         </h4>
-        <div style={{ display: 'flex', gap: 5 }}>
+        )}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
           {item.screenshots.map((img, i) => {
             const parts = img.split('_').pop().replace('.png', '').split('-');
             const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
             return (
               <div
                 key={i}
-                style={{ position: 'relative', width: 100, height: 56 }}
+                style={{ flex: '1 0 auto', height: 'auto', maxWidth: 'calc(100% / 6)', objectFit: 'contain', cursor: 'pointer' }}
                 onMouseEnter={() => setHoveredScreenshot({ video: item.file_name, time: seconds, index: `${idx}-${i}` })}
                 onMouseLeave={() => setHoveredScreenshot(null)}
                                     onClick={async () => {
