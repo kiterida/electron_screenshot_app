@@ -1,3 +1,5 @@
+// main.js
+
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -14,6 +16,16 @@ function initDatabase() {
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY,
       value TEXT
+    )
+  `).run();
+
+  db.prepare(`
+    CREATE TABLE IF NOT EXISTS media_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      tags TEXT,
+      file_name TEXT,
+      image_list TEXT
     )
   `).run();
 }
@@ -66,6 +78,27 @@ ipcMain.handle('save-screenshot', async (event, { filePath, buffer }) => {
   const data = Buffer.from(buffer.split(',')[1], 'base64');
   fs.writeFileSync(filePath, data);
   return true;
+});
+
+ipcMain.handle('add-media-item', async (event, { name, fileName }) => {
+  db.prepare(`
+    INSERT INTO media_items (name, tags, file_name, image_list)
+    VALUES (?, ?, ?, ?)
+  `).run(name, '', fileName, JSON.stringify([]));
+  return true;
+});
+
+ipcMain.handle('get-media-items', async () => {
+  return db.prepare('SELECT * FROM media_items').all();
+});
+
+ipcMain.handle('read-screenshots', async (event, folder, name) => {
+  if (!fs.existsSync(folder)) return [];
+  const all = fs.readdirSync(folder);
+  return all
+    .filter(f => f.startsWith(name.split('.')[0]) && f.endsWith('.png'))
+    .sort()
+    .slice(0, 6); // first 6 screenshots
 });
 
 

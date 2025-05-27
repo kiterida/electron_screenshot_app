@@ -1,3 +1,5 @@
+// App.js
+
 import React, { useRef, useState, useEffect } from 'react';
 
 function formatTime(seconds) {
@@ -13,6 +15,54 @@ function App() {
   const canvasRef = useRef(document.createElement('canvas'));
   const [videoPath, setVideoPath] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
+
+  const [mediaItems, setMediaItems] = useState([]);
+ 
+
+  useEffect(() => {
+    const loadMediaItems = async () => {
+      const items = await window.electronAPI.getMediaItems();
+      const folder = await window.electronAPI.getScreenshotFolder();
+
+      // Read directory contents from main process instead of using Node.js fs here
+      const enrichedItems = await Promise.all(
+        items.map(async (item) => {
+          const screenshots = await window.electronAPI.readScreenshots(folder, item.name);
+          return {
+            ...item,
+            screenshots: screenshots.map(name => `${folder}/${name}`)
+          };
+        })
+      );
+
+      setMediaItems(enrichedItems);
+    };
+
+    loadMediaItems();
+  }, []);
+
+    useEffect(() => {
+    window.electronAPI.onVideoSelected(async (path) => {
+      setVideoPath(path);
+      const folder = await window.electronAPI.getScreenshotFolder(path);
+      const name = path.split(/[\\/]/).pop();
+      const images = await window.electronAPI.readScreenshots(folder, name);
+      setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
+    });
+  }, []);
+
+
+
+const addToDatabase = async () => {
+  if (!videoPath) return;
+  const name = videoPath.split(/[\\/]/).pop();
+  await window.electronAPI.addMediaItem({ name, fileName: videoPath });
+  alert('Media item added to database!');
+};
+
+const openMediaFile = (path) => {
+  setVideoPath(path);
+};
 
  useEffect(() => {
   window.electronAPI.onVideoSelected((path) => {
@@ -56,6 +106,32 @@ const handleOpen = () => {
   return (
     <div style={{ padding: 20 }}>
       <h1>Video Screenshot Tool</h1>
+      {mediaItems.length > 0 && (
+        <>
+          <h2>Saved Media Items</h2>
+          {mediaItems.map((item, idx) => (
+            <div key={idx} style={{ border: '1px solid #ccc', margin: 10, padding: 10 }}>
+              <h4
+                style={{ cursor: 'pointer' }}
+                onClick={() => setVideoPath(item.file_name)}
+              >
+                {item.name}
+              </h4>
+              <div style={{ display: 'flex', gap: 5 }}>
+                {item.screenshots.map((img, i) => (
+                  <img
+                    key={i}
+                    src={`file://${img}`}
+                    style={{ width: 100 }}
+                    alt={`screenshot-${i}`}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
       <button onClick={handleOpen}>Open Video</button>
       <button onClick={() => window.electronAPI.selectScreenshotFolder()}>Set Screenshot Folder</button>
 
@@ -68,6 +144,7 @@ const handleOpen = () => {
             style={{ width: '100%', marginTop: 20 }}
           />
           <button onClick={takeScreenshot}>📸 Take Screenshot</button>
+          <button onClick={addToDatabase}>➕ Add to Database</button>
 
           <div style={{ marginTop: 20 }}>
             <h3>Screenshots</h3>
