@@ -1,6 +1,7 @@
 // App.js
 
 import React, { useRef, useState, useEffect } from 'react';
+import SettingsDialog from './components/SettingsDialog';
 
 function formatTime(seconds) {
   const pad = (n) => (n < 10 ? '0' + n : n);
@@ -22,8 +23,24 @@ function App() {
   const [isMuted, setIsMuted] = useState(true); // New state for audio toggle
 
   const [screenshotsPerRow, setScreenshotsPerRow] = useState(4);
+   const [settingsOpen, setSettingsOpen] = useState(false);
   const minScreenshotsPerRow = 1;
   const maxScreenshotsPerRow = 10;
+
+  const [appSettings, setAppSettings] = useState({});
+
+
+const loadSettings = async () => {
+  const settings = await window.electronAPI.getAppSettings();
+  console.log("loadSettings:", settings);
+  setAppSettings(settings);
+};
+
+// Call this after dialog closes
+const handleSettingsChanged = () => {
+  loadSettings();
+  setSettingsOpen(false);
+};
 
  useEffect(() => {
     const handleWheel = (e) => {
@@ -42,24 +59,39 @@ function App() {
     return () => window.removeEventListener('wheel', handleWheel);
   }, []);
 
-  useEffect(() => {
-    const loadMediaItems = async () => {
-      const items = await window.electronAPI.getMediaItems();
-      const folder = await window.electronAPI.getScreenshotFolder();
-      const enrichedItems = await Promise.all(
-        items.map(async (item) => {
-          const screenshots = await window.electronAPI.readScreenshots(folder, item.name, 100);
-          return {
-            ...item,
-            screenshots: screenshots.slice(0, 100).map(name => `${folder}/${name}`)
-            
-          };
-        })
-      );
-      setMediaItems(enrichedItems);
-    };
-    loadMediaItems();
-  }, []);
+ useEffect(() => {
+  const loadApp = async () => {
+    // 1. Load settings first and await completion
+    const settings = await window.electronAPI.getAppSettings();
+    setAppSettings(settings); // You may need to define this state
+    setScreenshotsPerRow(settings.default_screens_per_row);
+
+    // 2. Now load media items
+    const items = await window.electronAPI.getMediaItems();
+    const folder = await window.electronAPI.getScreenshotFolder();
+    
+    const enrichedItems = await Promise.all(
+      items.map(async (item) => {
+        const screenshots = await window.electronAPI.readScreenshots(
+          folder,
+          item.name,
+          settings.screens_load_per_item // Use updated setting
+        );
+        return {
+          ...item,
+          screenshots: screenshots
+            .slice(0, settings.screens_load_per_item) // Also use setting here
+            .map(name => `${folder}/${name}`)
+        };
+      })
+    );
+
+    setMediaItems(enrichedItems);
+  };
+
+  loadApp();
+}, []);
+
 
   useEffect(() => {
     window.electronAPI.onVideoSelected(async (path) => {
@@ -148,40 +180,51 @@ const toggleMute = () => {
     return (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
   };
 
-  useEffect(() => {
-  const handleContextMenu = (e) => {
-    e.preventDefault();
-    window.electronAPI.showContextMenu();
-  };
+//   useEffect(() => {
+//   const handleContextMenu = (e) => {
+//     e.preventDefault();
+//     window.electronAPI.showContextMenu();
+//   };
 
-  window.addEventListener('contextmenu', handleContextMenu);
+//   window.addEventListener('contextmenu', handleContextMenu);
   
-  return () => {
-    window.removeEventListener('contextmenu', handleContextMenu);
-  };
-}, []);
+//   return () => {
+//     window.removeEventListener('contextmenu', handleContextMenu);
+//   };
+// }, []);
 
 useEffect(() => {
-  window.electronAPI.onContextCommand((command) => {
-    if (command === 'enable-hover') {
-      // Enable hover logic
+  window.electronAPI.onContextCommand(async (data) => {
+    if (data.command === 'enable-hover') {
       setPlayOnHover(true);
-    } else if (command === 'disable-hover') {
+    } else if (data.command === 'disable-hover') {
       setPlayOnHover(false);
-      // Disable hover logic
-    } else if (command === 'open-settings') {
-      // Open settings logic
+    } else if (data.command === 'delete-item') {
+      const confirmed = window.confirm('Are you sure you want to delete this item?');
+      if (confirmed) {
+        await window.electronAPI.deleteMediaItem(data.id);
+        setMediaItems((prev) => prev.filter(item => item.id !== data.id));
+      }
+    } else if (data.command == "open-settings-window") {
+        setSettingsOpen(true);
     }
   });
 }, []);
 
 
+
   return (
     <div style={{ padding: 2 }}>
+       <SettingsDialog open={settingsOpen} onClose={handleSettingsChanged} />
       {mediaItems.length > 0 && (
         <>
           {mediaItems.map((item, idx) => (
-            <div key={idx} style={{ border: '1px solid #ccc', margin: 0, padding: 0 }}>
+            <div key={idx} style={{ border: '1px solid #ccc', margin: 0, padding: 0 }} 
+             onContextMenu={(e) => {
+              e.preventDefault();
+              window.electronAPI.showContextMenu(item.id); // Pass mediaItemId to main
+            }}
+            >
               {showItemName && (
                 <h4
                   style={{ cursor: 'pointer' }}

@@ -33,6 +33,25 @@ function initDatabase() {
   `).run();
 }
 
+// Load all settings
+ipcMain.handle('get-app-settings', () => {
+  const rows = db.prepare('SELECT key, value FROM app_settings').all();
+  const settings = {};
+  rows.forEach(row => {
+    settings[row.key] = parseInt(row.value, 10); // Or JSON.parse if more complex
+  });
+  return settings;
+});
+
+// Update single setting
+ipcMain.on('update-app-setting', (event, { key, value }) => {
+  db.prepare(`
+    INSERT INTO app_settings (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value.toString());
+});
+
 function getSetting(key) {
   const row = db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key);
   return row ? row.value : null;
@@ -105,30 +124,43 @@ ipcMain.handle('read-screenshots', async (event, folder, name, imageCount) => {
     .slice(0, imageCount); // first 6 screenshots
 });
 
-ipcMain.on('show-context-menu', (event) => {
+ipcMain.handle('delete-media-item', async (event, id) => {
+  db.prepare('DELETE FROM media_items WHERE id = ?').run(id);
+  return true;
+});
+
+
+ipcMain.on('show-context-menu', (event, mediaItemId) => {
   const template = [
-    {
+     {
       label: 'Play on Hover',
       submenu: [
         {
           label: 'Enable',
           click: () => {
-            event.sender.send('context-menu-command', 'enable-hover');
+            event.sender.send('context-menu-command', { command: 'enable-hover' });
           }
         },
         {
           label: 'Disable',
           click: () => {
-            event.sender.send('context-menu-command', 'disable-hover');
+            event.sender.send('context-menu-command', { command: 'disable-hover' });
           }
         }
       ]
     },
     { type: 'separator' },
     {
+      label: 'Delete Item',
+      click: () => {
+        event.sender.send('context-menu-command', { command: 'delete-item', id: mediaItemId });
+      }
+    },
+    { type: 'separator' },
+    {
       label: 'Settings',
       click: () => {
-        event.sender.send('context-menu-command', 'open-settings');
+        event.sender.send('context-menu-command', { command: 'open-settings-window' });
       }
     }
   ];
@@ -136,6 +168,40 @@ ipcMain.on('show-context-menu', (event) => {
   const menu = Menu.buildFromTemplate(template);
   menu.popup(BrowserWindow.fromWebContents(event.sender));
 });
+
+let settingsWindow = null;
+
+ipcMain.on('open-settings-window', () => {
+  if (settingsWindow) {
+    settingsWindow.focus();
+    return;
+  }
+
+  settingsWindow = new BrowserWindow({
+    width: 400,
+    height: 300,
+    parent: BrowserWindow.getFocusedWindow(),
+    modal: true,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  settingsWindow.loadFile(path.join(__dirname, 'build', 'settings.html'));
+
+  settingsWindow.once('ready-to-show', () => {
+    settingsWindow.show();
+  });
+
+  settingsWindow.on('closed', () => {
+    settingsWindow = null;
+  });
+});
+
+
 
 
 

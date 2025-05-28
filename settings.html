@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Settings</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 1rem;
+      }
+      label {
+        display: block;
+        margin-top: 1rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>App Settings</h2>
+    <label>
+      Screenshot Folder:
+      <input type="text" id="screenshotFolder" readonly />
+      <button onclick="chooseFolder()">Browse</button>
+    </label>
+    <script>
+      const input = document.getElementById('screenshotFolder');
+      async function chooseFolder() {
+        const folder = await window.electronAPI.selectScreenshotFolder();
+        if (folder) {
+          input.value = folder;
+        }
+      }
+
+      // Pre-fill input
+      (async () => {
+        const folder = await window.electronAPI.getScreenshotFolder();
+        input.value = folder || '';
+      })();
+    </script>
+  </body>
+</html>
