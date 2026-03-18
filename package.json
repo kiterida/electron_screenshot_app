@@ -1,17 +1,20 @@
 {
   "name": "electron-media-app",
+   "description": "Electron app for managing media items",
+  "author": "Kadoosh",
   "version": "0.1.0",
   "private": true,
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.0",
+    "@mui/icons-material": "^7.1.0",
     "@mui/material": "^7.1.0",
+    "@mui/x-data-grid": "^8.5.0",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^13.5.0",
     "better-sqlite3": "^11.10.0",
-    "canvas": "^2.11.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-scripts": "^5.0.1",
@@ -20,12 +23,36 @@
   },
   "main": "main.js",
   "homepage": "./",
+  "build": {
+    "extends": null,
+    "appId": "com.yourdomain.yourapp",
+    "productName": "YourAppName",
+    "files": [
+      "build/**/*",
+      "main.js",
+      "preload.js",
+      "convertScreenshotsToJpeg.js"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
   "scripts": {
-    "start": "react-scripts start",
-    "electron": "npm run build && electron .",
+    "start": "npm run build && set \"ELECTRON_RUN_AS_NODE=\" && electron .",
+    "electron": "npm run build && set \"ELECTRON_RUN_AS_NODE=\" && electron .",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "eject": "react-scripts eject",
+    "dist": "electron-builder"
   },
   "eslintConfig": {
     "extends": [
@@ -48,6 +75,7 @@
   "devDependencies": {
     "concurrently": "^8.2.2",
     "electron": "^36.3.1",
+    "electron-builder": "^26.0.12",
     "electron-rebuild": "^3.2.9",
     "wait-on": "^7.2.0"
   }

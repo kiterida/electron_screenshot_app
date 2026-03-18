@@ -12,11 +12,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addMediaItem: (item) => ipcRenderer.invoke('add-media-item', item),
   getMediaItems: () => ipcRenderer.invoke('get-media-items'),
   readScreenshots: (folder, name, imageCount) => ipcRenderer.invoke('read-screenshots', folder, name, imageCount),
-    showContextMenu: (id) => ipcRenderer.send('show-context-menu', id),
+    showContextMenu: (id, filePath, screenshotPath) => ipcRenderer.send('show-context-menu', id, filePath, screenshotPath),
   onContextCommand: (callback) => ipcRenderer.on('context-menu-command', (event, data) => callback(data)),
   deleteMediaItem: (id) => ipcRenderer.invoke('delete-media-item', id),
   openSettingsWindow: () => ipcRenderer.send('open-settings-window'),
    getAppSettings: () => ipcRenderer.invoke('get-app-settings'),
   updateAppSetting: (key, value) => ipcRenderer.send('update-app-setting', { key, value }),
+  openScreenshotFolder: (filePath) => ipcRenderer.send('open-screenshot-folder', filePath),
+  openFileLocation: (filePath) => ipcRenderer.send('open-file-location', filePath),
+  searchMediaItems: (query) => ipcRenderer.invoke('search-media-items', query),
+  getMediaItemByName: (name) => ipcRenderer.invoke('get-media-item-by-name', name),
+  getAllMediaItems: () => ipcRenderer.invoke('get-all-media-items'),
 
 });

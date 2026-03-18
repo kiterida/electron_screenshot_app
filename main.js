@@ -2,7 +2,20 @@
 const { convertPngToJpegInDirectory } = require('./convertScreenshotsToJpeg');
 
 
-const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron');
+
+const isDev = !app.isPackaged;
+
+function getDbPath() {
+  if (isDev) {
+    // In development, use local folder
+    return path.join(__dirname, 'app_settings.db');
+  } else {
+    // In production, use directory where EXE is located
+    return path.join(path.dirname(process.execPath), 'app_settings.db');
+  }
+}
+
 
 const path = require('path');
 const fs = require('fs');
@@ -12,6 +25,7 @@ let db;
 
 function initDatabase() {
   const dbPath = path.join(app.getPath('userData'), 'app_settings.db');
+  //const dbPath = getDbPath();
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
 
@@ -115,22 +129,73 @@ ipcMain.handle('get-media-items', async () => {
   return db.prepare('SELECT * FROM media_items').all();
 });
 
-ipcMain.handle('read-screenshots', async (event, folder, name, imageCount) => {
+// ipcMain.handle('read-screenshots', async (event, folder, name, imageCount) => {
+//   if (!fs.existsSync(folder)) return [];
+//   const all = fs.readdirSync(folder);
+//   return all
+//     .filter(f => f.startsWith(name.split('.')[0]) && /\.(png|jpe?g)$/.test(f))
+//     .sort()
+//     .slice(0, imageCount); // first 6 screenshots
+// });
+
+ipcMain.handle('read-screenshots', async (event, folder, videoFilename, imageCount) => {
   if (!fs.existsSync(folder)) return [];
+
   const all = fs.readdirSync(folder);
+
+  // Remove only the final video extension (preserve full filename up to it)
+  const baseName = videoFilename.replace(/\.(mp4|mov|avi|mpg|mkv|webm)$/i, '');
+
   return all
-    .filter(f => f.startsWith(name.split('.')[0]) && /\.(png|jpe?g)$/.test(f))
+    .filter(f => f.startsWith(baseName) && /\.(png|jpe?g)$/i.test(f))
     .sort()
-    .slice(0, imageCount); // first 6 screenshots
+    .slice(0, imageCount);
 });
+
 
 ipcMain.handle('delete-media-item', async (event, id) => {
   db.prepare('DELETE FROM media_items WHERE id = ?').run(id);
   return true;
 });
 
+ipcMain.on('open-screenshot-folder', (event, filePath) => {
+  console.log('open-screenshot-folder', filePath);
+  if (filePath) {
+    shell.showItemInFolder(filePath);
+  }
+});
 
-ipcMain.on('show-context-menu', (event, mediaItemId) => {
+ipcMain.on('open-file-location', (event, filePath) => {
+   if (filePath) {
+    shell.showItemInFolder(filePath);
+  }
+});
+
+ipcMain.handle('search-media-items', async (event, query) => {
+  const stmt = db.prepare(`
+    SELECT * FROM media_items
+    WHERE name LIKE ?
+  `);
+  return stmt.all(`%${query}%`);
+});
+
+ipcMain.handle('get-media-item-by-name', (event, name) => {
+  const stmt = db.prepare('SELECT * FROM media_items WHERE name LIKE ?');
+  const likePattern = `%${name}%`;
+  return stmt.get(likePattern);
+});
+
+
+ipcMain.handle('get-all-media-items', async () => {
+  const rows = db.prepare('SELECT * FROM media_items').all();
+  return rows;
+});
+
+
+
+
+
+ipcMain.on('show-context-menu', (event, mediaItemId, filePath, screenshotPath) => {
   const template = [
      {
       label: 'Play on Hover',
@@ -149,6 +214,19 @@ ipcMain.on('show-context-menu', (event, mediaItemId) => {
         }
       ]
     },
+    {
+      label: 'Open File Location',
+      click: () => {
+        event.sender.send('context-menu-command', { command: 'open-file-location', path: filePath});
+      }
+    },
+    {
+  label: 'Open Screenshot Folder',
+  click: () => {
+    event.sender.send('context-menu-command', { command: 'open-screenshot-folder', path: screenshotPath });
+  }
+}
+,
     { type: 'separator' },
     {
       label: 'Delete Item',
@@ -170,6 +248,22 @@ ipcMain.on('show-context-menu', (event, mediaItemId) => {
 });
 
 let settingsWindow = null;
+let mainWindow = null;
+
+function createMainWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      enableRemoteModule: false,
+      nodeIntegration: false,
+    },
+  });
+
+  mainWindow.loadFile(path.join(__dirname, 'build', 'index.html'));
+}
 
 ipcMain.on('open-settings-window', () => {
   if (settingsWindow) {
@@ -207,16 +301,18 @@ ipcMain.on('open-settings-window', () => {
 
 app.whenReady().then(() => {
   initDatabase();
-  const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    webPreferences: {
-  preload: path.join(__dirname, 'preload.js'),
-  contextIsolation: true,
-  enableRemoteModule: false,
-  nodeIntegration: false,
-}
-  });
-  win.loadFile(path.join(__dirname, 'build', 'index.html'));
+  createMainWindow();
+});
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createMainWindow();
+  }
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
 });
 

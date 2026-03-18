@@ -2,6 +2,8 @@
 
 import React, { useRef, useState, useEffect } from 'react';
 import SettingsDialog from './components/SettingsDialog';
+import SearchDialog from './components/SearchDialog';
+import MediaTableDialog from './components/MediaTableDialog';
 
 function formatTime(seconds) {
   const pad = (n) => (n < 10 ? '0' + n : n);
@@ -21,28 +23,94 @@ function App() {
   const [showItemName, setShowItemName] = useState(false);
   const [playOnHover, setPlayOnHover] = useState(false);
   const [isMuted, setIsMuted] = useState(true); // New state for audio toggle
+  const [showSearch, setShowSearch] = useState(false);
+  const [randomResults, setRandomResults] = useState([]);
+  const [openMediaTable, setOpenMediaTable] = useState(false);
 
   const [screenshotsPerRow, setScreenshotsPerRow] = useState(4);
-   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const minScreenshotsPerRow = 1;
   const maxScreenshotsPerRow = 10;
 
   const [appSettings, setAppSettings] = useState({});
+  const [autoPlayOnScreenshotClick, setAutoPlayOnScreenshotClick] = useState(true);
+
+  useEffect(() => {
+    const fetch = async () => {
+      const results = await loadRandomScreenshotsWithMedia();
+      setRandomResults(results);
+    };
+    fetch();
+  }, []);
 
 
-const loadSettings = async () => {
-  const settings = await window.electronAPI.getAppSettings();
-  console.log("loadSettings:", settings);
-  setAppSettings(settings);
-};
+  const loadSettings = async () => {
+    const settings = await window.electronAPI.getAppSettings();
+    console.log("loadSettings:", settings);
+    setAppSettings(settings);
+  };
 
-// Call this after dialog closes
-const handleSettingsChanged = () => {
-  loadSettings();
-  setSettingsOpen(false);
-};
+  // Call this after dialog closes
+  const handleSettingsChanged = () => {
+    loadSettings();
+    setSettingsOpen(false);
+  };
 
- useEffect(() => {
+  const loadRandomScreenshotsWithMedia = async () => {
+    const folder = await window.electronAPI.getScreenshotFolder();
+    const allScreenshots = await window.electronAPI.readScreenshots(folder, '', 1000);
+
+    if (!allScreenshots || allScreenshots.length === 0) return [];
+
+    // Step 1: Shuffle and pick 6
+    const shuffled = [...allScreenshots].sort(() => 0.5 - Math.random());
+    const selected = shuffled.slice(0, 60);
+
+    // Step 2: Remove timestamp to get media name and query DB
+    const results = await Promise.all(
+      selected.map(async (fileName) => {
+        // Remove "_HH-MM-SS.jpeg" or "_HH-MM-SS.jpg"
+        const mediaName = fileName.replace(/_\d{2}-\d{2}-\d{2}\.jpe?g$/i, '');
+
+        console.log("mediaName: ", mediaName);
+        const mediaItem = await window.electronAPI.getMediaItemByName(mediaName);
+
+        return {
+          screenshotPath: `${folder}/${fileName}`,
+          mediaItem,
+          fileName,
+        };
+      })
+    );
+
+    return results.filter(Boolean); // remove any nulls
+  };
+
+
+
+  const handleSearchResults = async (searchResults) => {
+    if (searchResults && searchResults.length > 0) {
+      const settings = await window.electronAPI.getAppSettings();
+      const enrichedItems = await loadAndEnrichMediaItems(searchResults, settings);
+      setMediaItems(enrichedItems);
+    } else {
+      setMediaItems([]); // or show "No results"
+    }
+  };
+
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.ctrlKey && e.key === 'f') {
+        e.preventDefault();
+        setShowSearch(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  useEffect(() => {
     const handleWheel = (e) => {
       if (e.ctrlKey) {
         e.preventDefault();
@@ -59,38 +127,73 @@ const handleSettingsChanged = () => {
     return () => window.removeEventListener('wheel', handleWheel);
   }, []);
 
- useEffect(() => {
-  const loadApp = async () => {
-    // 1. Load settings first and await completion
-    const settings = await window.electronAPI.getAppSettings();
-    setAppSettings(settings); // You may need to define this state
-    setScreenshotsPerRow(settings.default_screens_per_row);
-
-    // 2. Now load media items
-    const items = await window.electronAPI.getMediaItems();
+  const loadAndEnrichMediaItems = async (items, settings) => {
     const folder = await window.electronAPI.getScreenshotFolder();
-    
     const enrichedItems = await Promise.all(
       items.map(async (item) => {
         const screenshots = await window.electronAPI.readScreenshots(
           folder,
           item.name,
-          settings.screens_load_per_item // Use updated setting
+          settings.screens_load_per_item
         );
         return {
           ...item,
           screenshots: screenshots
-            .slice(0, settings.screens_load_per_item) // Also use setting here
-            .map(name => `${folder}/${name}`)
+            .slice(0, settings.screens_load_per_item)
+            .map((name) => `${folder}/${name}`)
         };
       })
     );
-
-    setMediaItems(enrichedItems);
+    return enrichedItems;
   };
 
-  loadApp();
-}, []);
+  useEffect(() => {
+    const loadApp = async () => {
+      const settings = await window.electronAPI.getAppSettings();
+      setAppSettings(settings);
+      setScreenshotsPerRow(settings.default_screens_per_row);
+
+      const items = await window.electronAPI.getMediaItems();
+      const enrichedItems = await loadAndEnrichMediaItems(items, settings);
+      setMediaItems(enrichedItems);
+    };
+
+    loadApp();
+  }, []);
+
+
+  // useEffect(() => {
+  //   const loadApp = async () => {
+  //     // 1. Load settings first and await completion
+  //     const settings = await window.electronAPI.getAppSettings();
+  //     setAppSettings(settings); // You may need to define this state
+  //     setScreenshotsPerRow(settings.default_screens_per_row);
+
+  //     // 2. Now load media items
+  //     const items = await window.electronAPI.getMediaItems();
+  //     const folder = await window.electronAPI.getScreenshotFolder();
+
+  //     const enrichedItems = await Promise.all(
+  //       items.map(async (item) => {
+  //         const screenshots = await window.electronAPI.readScreenshots(
+  //           folder,
+  //           item.name,
+  //           settings.screens_load_per_item // Use updated setting
+  //         );
+  //         return {
+  //           ...item,
+  //           screenshots: screenshots
+  //             .slice(0, settings.screens_load_per_item) // Also use setting here
+  //             .map(name => `${folder}/${name}`)
+  //         };
+  //       })
+  //     );
+
+  //     setMediaItems(enrichedItems);
+  //   };
+
+  //   loadApp();
+  // }, []);
 
 
   useEffect(() => {
@@ -98,6 +201,7 @@ const handleSettingsChanged = () => {
       setVideoPath(path);
       const folder = await window.electronAPI.getScreenshotFolder(path);
       const name = path.split(/[\\/]/).pop();
+      console.log("read screenshots for: ", name);
       const images = await window.electronAPI.readScreenshots(folder, name, 100);
       setScreenshots(images.map((img) => ({ name: img, path: `${folder}/${img}` })));
     });
@@ -125,34 +229,52 @@ const handleSettingsChanged = () => {
   };
 
   const stepBack = () => {
-  const video = videoRef.current;
-  if (video) {
-    const frameDuration = 1 / 30; // assuming 30fps
-    video.currentTime = Math.max(0, video.currentTime - frameDuration);
-  }
-};
+    const video = videoRef.current;
+    if (video) {
+      const frameDuration = 1 / 30; // assuming 30fps
+      video.currentTime = Math.max(0, video.currentTime - frameDuration);
+    }
+  };
 
-const stepForward = () => {
-  const video = videoRef.current;
-  if (video) {
-    const frameDuration = 1 / 30; // assuming 30fps
-    video.currentTime = Math.min(video.duration, video.currentTime + frameDuration);
-  }
-};
+  const stepForward = () => {
+    const video = videoRef.current;
+    if (video) {
+      const frameDuration = 1 / 30; // assuming 30fps
+      console.log("setForward");
+      video.currentTime = Math.min(video.duration, video.currentTime + frameDuration);
+    }
+  };
 
-const toggleMute = () => {
-  const video = videoRef.current;
-  if (video) {
-    video.muted = !video.muted;
-    setIsMuted(video.muted);
+  const goForwardTenSeconds = () => {
+    console.log("calling function");
+    const video = videoRef.current;
+    if (video) {
+      console.log("goForwardTenSeconds");
+      video.currentTime = Math.min(video.duration, video.currentTime + 10);
+    }
   }
-};
+
+  const goBackTenSeconds = () => {
+    const video = videoRef.current;
+    if (video) {
+      video.currentTime = Math.max(0, video.currentTime - 10);
+    }
+  }
+
+  const toggleMute = () => {
+    const video = videoRef.current;
+    if (video) {
+      video.muted = !video.muted;
+      setIsMuted(video.muted);
+    }
+  };
 
 
   const takeScreenshot = async () => {
     const video = videoRef.current;
     if (!video) return;
 
+    console.log("videoPath: ", videoPath);
     const folder = await window.electronAPI.getScreenshotFolder(videoPath);
     const ctx = canvasRef.current.getContext('2d');
     canvasRef.current.width = video.videoWidth;
@@ -160,8 +282,15 @@ const toggleMute = () => {
     ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
     const timestamp = formatTime(video.currentTime);
-    const name = `${videoPath.split(/[\\/]/).pop().split('.')[0]}_${timestamp}.jpeg`;
-    const buffer = canvasRef.current.toDataURL('image/jpeg', 0.85); // JPEG encoding
+    //const name = `${videoPath.split(/[\\/]/).pop().split('.')[0]}_${timestamp}.jpeg`;
+
+    const originalFilename = videoPath.split(/[\\/]/).pop(); // Extract filename from path
+    const baseName = originalFilename.replace(/\.(mp4|mov|avi|mpg|mkv|webm)$/i, ''); // Remove only the final video extension
+    const name = `${baseName}_${timestamp}.jpeg`;
+
+    const buffer = canvasRef.current.toDataURL('image/jpeg', 1); // JPEG encoding
+
+    console.log("screenshot name: ", name);
 
     const filePath = `${folder}/${name}`;
     await window.electronAPI.saveScreenshot(filePath, buffer);
@@ -172,7 +301,8 @@ const toggleMute = () => {
     const parts = filename.split('_').pop().replace('.jpeg', '').split('-');
     const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
     videoRef.current.currentTime = seconds;
-    videoRef.current.play();
+    if (autoPlayOnScreenshotClick)
+      videoRef.current.play();
   };
 
   const getTimeFromFilename = (filename) => {
@@ -180,50 +310,75 @@ const toggleMute = () => {
     return (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
   };
 
-//   useEffect(() => {
-//   const handleContextMenu = (e) => {
-//     e.preventDefault();
-//     window.electronAPI.showContextMenu();
-//   };
+  //   useEffect(() => {
+  //   const handleContextMenu = (e) => {
+  //     e.preventDefault();
+  //     window.electronAPI.showContextMenu();
+  //   };
 
-//   window.addEventListener('contextmenu', handleContextMenu);
-  
-//   return () => {
-//     window.removeEventListener('contextmenu', handleContextMenu);
-//   };
-// }, []);
+  //   window.addEventListener('contextmenu', handleContextMenu);
 
-useEffect(() => {
-  window.electronAPI.onContextCommand(async (data) => {
-    if (data.command === 'enable-hover') {
-      setPlayOnHover(true);
-    } else if (data.command === 'disable-hover') {
-      setPlayOnHover(false);
-    } else if (data.command === 'delete-item') {
-      const confirmed = window.confirm('Are you sure you want to delete this item?');
-      if (confirmed) {
-        await window.electronAPI.deleteMediaItem(data.id);
-        setMediaItems((prev) => prev.filter(item => item.id !== data.id));
-      }
-    } else if (data.command == "open-settings-window") {
+  //   return () => {
+  //     window.removeEventListener('contextmenu', handleContextMenu);
+  //   };
+  // }, []);
+
+  useEffect(() => {
+    window.electronAPI.onContextCommand(async (data) => {
+      if (data.command === 'enable-hover') {
+        setPlayOnHover(true);
+      } else if (data.command === 'disable-hover') {
+        setPlayOnHover(false);
+      } else if (data.command === 'delete-item') {
+        const confirmed = window.confirm('Are you sure you want to delete this item?');
+        if (confirmed) {
+          await window.electronAPI.deleteMediaItem(data.id);
+          setMediaItems((prev) => prev.filter(item => item.id !== data.id));
+        }
+      } else if (data.command == "open-settings-window") {
         setSettingsOpen(true);
-    }
-  });
-}, []);
+      } else if (data.command == "open-screenshot-folder") {
+        await window.electronAPI.openScreenshotFolder(data.path);
+      } else if (data.command == "open-file-location") {
+        await window.electronAPI.openFileLocation(data.path);
+      }
+    });
+  }, []);
 
 
 
   return (
     <div style={{ padding: 2 }}>
-       <SettingsDialog open={settingsOpen} onClose={handleSettingsChanged} />
+      <button onClick={() => setOpenMediaTable(true)}>Open Media Table</button>
+      <MediaTableDialog open={openMediaTable} onClose={() => setOpenMediaTable(false)} />
+      <div style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}>
+         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
+      {randomResults.map(({ screenshotPath, mediaItem }, i) => (
+       
+        
+          <div key={i} style={{ flex: '1 0 auto', height: 'auto', maxWidth: `calc(100% / ${screenshotsPerRow})`, objectFit: 'contain', cursor: 'pointer' }}>
+          <img src={`file://${screenshotPath}`} alt=""  style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }} />
+          </div>
+        
+      ))}
+      </div>
+        </div>
+      <SettingsDialog open={settingsOpen} onClose={handleSettingsChanged} />
+      <SearchDialog
+        open={showSearch}
+        onClose={() => setShowSearch(false)}
+        onSearchResults={handleSearchResults}
+      />
       {mediaItems.length > 0 && (
         <>
           {mediaItems.map((item, idx) => (
-            <div key={idx} style={{ border: '1px solid #ccc', margin: 0, padding: 0 }} 
-             onContextMenu={(e) => {
-              e.preventDefault();
-              window.electronAPI.showContextMenu(item.id); // Pass mediaItemId to main
-            }}
+            <div key={idx} style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                console.log("onContextMenu: item = ", item);
+                console.log("screenshots[0]: ", item.screenshots[0])
+                window.electronAPI.showContextMenu(item.id, item.file_name, item.screenshots[0]); // Pass mediaItemId to main
+              }}
             >
               {showItemName && (
                 <h4
@@ -263,7 +418,7 @@ useEffect(() => {
                         }, 100);
                       }}
                     >
-                      {( playOnHover && hoveredScreenshot?.index === `${idx}-${i}`) ? (
+                      {(playOnHover && hoveredScreenshot?.index === `${idx}-${i}`) ? (
                         <video
                           src={`file://${item.file_name}`}
                           style={{ width: '100%', height: '100%' }}
@@ -292,27 +447,45 @@ useEffect(() => {
 
       <button onClick={handleOpen}>Open Video</button>
       <button onClick={() => window.electronAPI.selectScreenshotFolder()}>Set Screenshot Folder</button>
- 
+
 
 
       {videoPath && (
         <>
-          <video
-            ref={videoRef}
-            src={`file://${videoPath}`}
-            controls
-            muted={isMuted}
-            style={{ width: '100%', marginTop: 20 }}
-          />
+          <div
+            style={{
+              resize: 'both',
+              overflow: 'auto',
+              width: '640px', // Set initial size
+              maxWidth: '100%',
+              minHeight: 'auto',
+              border: '1px solid #ccc',
+              padding: '8px',
+              display: 'inline-block',
+            }}
+          >
+            <video
+              ref={videoRef}
+              src={`file://${videoPath}`}
+              controls
+              muted={isMuted}
+              style={{ width: '100%', height: 'auto' }}
+            />
+          </div>
+
           <button onClick={takeScreenshot}>📸 Take Screenshot</button>
           <button onClick={addToDatabase}>➕ Add to Database</button>
-               <div style={{ marginTop: 10 }}>
-  <button onClick={stepBack}>&lt;</button>
-  <button onClick={stepForward}>&gt;</button>
-  <button onClick={toggleMute}>
-    {isMuted ? '🔇 Unmute' : '🔊 Mute'}
-  </button>
-</div>
+
+          <div style={{ marginTop: 10 }}>
+            <button onClick={() => setAutoPlayOnScreenshotClick(!autoPlayOnScreenshotClick)}>{autoPlayOnScreenshotClick ? "Turn Autoplay off" : "Turn Autoplay On"}</button>
+            <button onClick={stepBack}>&lt;</button>
+            <button onClick={stepForward}>&gt;</button>
+            <button onClick={goBackTenSeconds}>&lt; 10s</button>
+            <button onClick={goForwardTenSeconds}>10s &gt;</button>
+            <button onClick={toggleMute}>
+              {isMuted ? '🔇 Unmute' : '🔊 Mute'}
+            </button>
+          </div>
 
           <div style={{ marginTop: 20 }}>
             <h3>Screenshots</h3>
@@ -330,6 +503,7 @@ useEffect(() => {
           </div>
         </>
       )}
+
     </div>
   );
 }
