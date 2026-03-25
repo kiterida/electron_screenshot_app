@@ -1,6 +1,7 @@
 // App.js
 
 import React, { useRef, useState, useEffect } from 'react';
+import { Tooltip } from '@mui/material';
 import SettingsDialog from './components/SettingsDialog';
 import SearchDialog from './components/SearchDialog';
 import MediaTableDialog from './components/MediaTableDialog';
@@ -25,6 +26,8 @@ function App() {
   const [isMuted, setIsMuted] = useState(true); // New state for audio toggle
   const [showSearch, setShowSearch] = useState(false);
   const [randomResults, setRandomResults] = useState([]);
+  const [topMediaItemScreenshots, setTopMediaItemScreenshots] = useState([]);
+  const [topMediaItemName, setTopMediaItemName] = useState('');
   const [openMediaTable, setOpenMediaTable] = useState(false);
 
   const [screenshotsPerRow, setScreenshotsPerRow] = useState(4);
@@ -34,6 +37,7 @@ function App() {
 
   const [appSettings, setAppSettings] = useState({});
   const [autoPlayOnScreenshotClick, setAutoPlayOnScreenshotClick] = useState(true);
+  const [currentMediaItemId, setCurrentMediaItemId] = useState(null);
 
   const mapScreenshotRecord = (record) => ({
     id: record.id,
@@ -152,6 +156,25 @@ function App() {
     return enrichedItems;
   };
 
+  const showMediaItemScreenshotsAtTop = async (mediaItemId) => {
+    if (!mediaItemId) {
+      return;
+    }
+
+    const mediaItem = await window.electronAPI.getMediaItemById(mediaItemId);
+    const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(mediaItemId, 5000);
+
+    setTopMediaItemName(mediaItem?.name || mediaItem?.file_name || 'Media Item');
+    setTopMediaItemScreenshots(
+      screenshotRows.map((row) => ({
+        ...row,
+        mediaItem,
+      }))
+    );
+
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   useEffect(() => {
     const loadApp = async () => {
       const settings = await window.electronAPI.getAppSettings();
@@ -205,6 +228,7 @@ function App() {
     window.electronAPI.onVideoSelected(async (path) => {
       setVideoPath(path);
       const mediaItem = await window.electronAPI.getOrCreateMediaItem(path);
+      setCurrentMediaItemId(mediaItem?.id || null);
       const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(mediaItem.id, 100);
       setScreenshots(screenshotRows.map(mapScreenshotRecord));
     });
@@ -212,7 +236,8 @@ function App() {
 
   const addToDatabase = async () => {
     if (!videoPath) return;
-    await window.electronAPI.getOrCreateMediaItem(videoPath);
+    const mediaItem = await window.electronAPI.getOrCreateMediaItem(videoPath);
+    setCurrentMediaItemId(mediaItem?.id || null);
     alert('Media item added to database!');
   };
 
@@ -226,9 +251,17 @@ function App() {
     });
   }, []);
 
+  useEffect(() => {
+    if (videoPath) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [videoPath]);
+
   const handleOpen = () => {
     window.electronAPI.openVideoDialog();
   };
+
+  const currentVideoName = videoPath ? videoPath.split(/[\\/]/).pop() : '';
 
   const stepBack = () => {
     const video = videoRef.current;
@@ -360,16 +393,182 @@ function App() {
           prev.filter((item) => item.id !== data.screenshotId)
         );
         await refreshRandomResults();
+      } else if (data.command === 'show-all-screenshots-for-media-item') {
+        await showMediaItemScreenshotsAtTop(data.mediaItemId);
       }
     });
+  }, []);
+
+  useEffect(() => {
+    const handleOpenMediaTable = () => setOpenMediaTable(true);
+    window.electronAPI.onOpenMediaTable(handleOpenMediaTable);
   }, []);
 
 
 
   return (
     <div style={{ padding: 2 }}>
-      <button onClick={() => setOpenMediaTable(true)}>Open Media Table</button>
+      {videoPath && (
+        <div
+          style={{
+            marginBottom: 12,
+            border: '1px solid #d6dbe3',
+            borderRadius: 18,
+            overflow: 'hidden',
+            background: 'linear-gradient(180deg, #f8fafc 0%, #eef3f8 100%)',
+            boxShadow: '0 10px 30px rgba(15, 23, 42, 0.08)',
+          }}
+        >
+          <div
+            style={{
+              padding: '16px 18px 10px',
+              borderBottom: '1px solid rgba(148, 163, 184, 0.25)',
+              background: 'rgba(255, 255, 255, 0.72)',
+            }}
+          >
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#0f172a' }}>
+              {currentVideoName || 'Selected Video'}
+            </div>
+            <div
+              style={{
+                marginTop: 4,
+                fontSize: 13,
+                color: '#475569',
+                wordBreak: 'break-all',
+              }}
+            >
+              {videoPath}
+            </div>
+          </div>
+
+          <div style={{ padding: 16 }}>
+            <div
+              style={{
+                width: '100%',
+                borderRadius: 16,
+                overflow: 'hidden',
+                background: '#020617',
+              }}
+            >
+              <video
+                ref={videoRef}
+                src={`file://${videoPath}`}
+                controls
+                muted={isMuted}
+                style={{
+                  width: '100%',
+                  maxHeight: '72vh',
+                  display: 'block',
+                  background: '#000',
+                }}
+              />
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 10,
+                marginTop: 14,
+              }}
+            >
+              <button onClick={takeScreenshot}>Take Screenshot</button>
+              <button onClick={addToDatabase} disabled={Boolean(currentMediaItemId)}>
+                {currentMediaItemId ? 'Already in Database' : 'Add to Database'}
+              </button>
+              <button onClick={() => setAutoPlayOnScreenshotClick(!autoPlayOnScreenshotClick)}>
+                {autoPlayOnScreenshotClick ? 'Turn Autoplay off' : 'Turn Autoplay On'}
+              </button>
+              <button onClick={stepBack}>&lt;</button>
+              <button onClick={stepForward}>&gt;</button>
+              <button onClick={goBackTenSeconds}>&lt; 10s</button>
+              <button onClick={goForwardTenSeconds}>10s &gt;</button>
+              <button onClick={toggleMute}>{isMuted ? 'Unmute' : 'Mute'}</button>
+            </div>
+
+            <div style={{ marginTop: 18 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  marginBottom: 10,
+                }}
+              >
+                <h3 style={{ margin: 0 }}>Screenshots ({screenshots.length})</h3>
+                <span style={{ fontSize: 13, color: '#64748b' }}>
+                  Click a screenshot to seek the video
+                </span>
+              </div>
+              <div
+                style={{
+                  maxHeight: 260,
+                  overflowY: 'auto',
+                  padding: 8,
+                  borderRadius: 14,
+                  background: 'rgba(255,255,255,0.68)',
+                  border: '1px solid rgba(148, 163, 184, 0.25)',
+                }}
+              >
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                  {screenshots.map((shot, idx) => (
+                    <img
+                      key={idx}
+                      src={`file://${shot.path}`}
+                      style={{
+                        width: 160,
+                        height: 90,
+                        objectFit: 'cover',
+                        borderRadius: 10,
+                        cursor: 'pointer',
+                        boxShadow: '0 4px 14px rgba(15, 23, 42, 0.12)',
+                      }}
+                      onClick={() => seekToScreenshot(shot)}
+                      alt={shot.name}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <MediaTableDialog open={openMediaTable} onClose={() => setOpenMediaTable(false)} />
+      {topMediaItemScreenshots.length > 0 && (
+        <div style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 8 }}>
+            <strong>{topMediaItemName} Screenshots ({topMediaItemScreenshots.length})</strong>
+            <button
+              onClick={() => {
+                setTopMediaItemScreenshots([]);
+                setTopMediaItemName('');
+              }}
+            >
+              Clear
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
+            {topMediaItemScreenshots.map(({ id, file_path: screenshotPath, mediaItem }, i) => (
+              <div
+                key={`top-media-${id}-${i}`}
+                style={{ flex: '1 0 auto', height: 'auto', maxWidth: `calc(100% / ${screenshotsPerRow})`, objectFit: 'contain', cursor: 'pointer' }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  window.electronAPI.showContextMenu({
+                    screenshotId: id,
+                    screenshotPath,
+                    mediaItemId: mediaItem?.id,
+                    filePath: mediaItem?.file_name,
+                  });
+                }}
+              >
+                <img src={`file://${screenshotPath}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}>
          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
       {randomResults.map(({ id, file_path: screenshotPath, mediaItem }, i) => (
@@ -476,12 +675,34 @@ function App() {
         </>
       )}
 
-      <button onClick={handleOpen}>Open Video</button>
-      <button onClick={() => window.electronAPI.selectScreenshotFolder()}>Set Screenshot Folder</button>
+      <Tooltip title="Open Video">
+        <button
+          onClick={handleOpen}
+          style={{
+            position: 'fixed',
+            left: 16,
+            bottom: 16,
+            width: 56,
+            height: 56,
+            borderRadius: '50%',
+            border: 'none',
+            background: '#1976d2',
+            color: '#fff',
+            fontSize: 32,
+            lineHeight: 1,
+            cursor: 'pointer',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.25)',
+            zIndex: 1000,
+          }}
+          aria-label="Open Video"
+        >
+          +
+        </button>
+      </Tooltip>
 
 
 
-      {videoPath && (
+      {false && videoPath && (
         <>
           <div
             style={{

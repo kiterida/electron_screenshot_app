@@ -801,6 +801,15 @@ ipcMain.handle('get-media-item-for-screenshot', async (event, screenshotId) => {
   }
 });
 
+ipcMain.handle('get-media-item-by-id', async (event, mediaItemId) => {
+  try {
+    return db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaItemId);
+  } catch (error) {
+    console.error('Failed to load media item by id:', error);
+    throw error;
+  }
+});
+
 ipcMain.handle('get-ignored-screenshots', async () => {
   try {
     const screenshots = getIgnoredScreenshots();
@@ -1003,6 +1012,16 @@ ipcMain.on('show-context-menu', (event, payload = {}) => {
         event.sender.send('context-menu-command', { command: 'ignore-from-random-selection', screenshotId, screenshotPath });
       }
     },
+    {
+      label: 'Show All Screenshots For This Media Item',
+      enabled: Boolean(mediaItemId),
+      click: () => {
+        event.sender.send('context-menu-command', {
+          command: 'show-all-screenshots-for-media-item',
+          mediaItemId,
+        });
+      }
+    },
     { type: 'separator' },
     {
       label: 'Delete Item',
@@ -1141,6 +1160,14 @@ function openSettingsWindow() {
 
 ipcMain.on('open-settings-window', () => {
   openSettingsWindow();
+});
+
+ipcMain.on('open-media-table', (event) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('open-media-table');
+  } else {
+    event.sender.send('open-media-table');
+  }
 });
 
 

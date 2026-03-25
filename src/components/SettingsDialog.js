@@ -49,6 +49,15 @@ export default function SettingsDialog({ open, onClose }) {
     window.location.reload();
   };
 
+  const handleSelectScreenshotFolder = async () => {
+    const screenshotFolder = await window.electronAPI.selectScreenshotFolder();
+    if (!screenshotFolder) {
+      return;
+    }
+
+    window.location.reload();
+  };
+
   const handleMigrateScreenshots = async () => {
     const result = await window.electronAPI.migrateScreenshotsFromFolder();
     setMigrationResult(result);
@@ -106,8 +115,14 @@ export default function SettingsDialog({ open, onClose }) {
             <Button variant="outlined" onClick={handleCreateDatabaseFile}>
               Create New Database
             </Button>
+            <Button variant="outlined" onClick={handleSelectScreenshotFolder}>
+              Set Screenshot Folder
+            </Button>
             <Button variant="outlined" onClick={handleMigrateScreenshots}>
               Migrate Existing Screenshots
+            </Button>
+            <Button variant="outlined" onClick={() => window.electronAPI.openMediaTable()}>
+              Open Media Table
             </Button>
             <Button variant="outlined" onClick={() => setIgnoredDialogOpen(true)}>
               View Ignored Random Screenshots
