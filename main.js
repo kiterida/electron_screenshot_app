@@ -25,6 +25,7 @@ const Database = require('better-sqlite3');
 let db;
 let currentDbPath;
 let requestedDbPath = null;
+const activeRandomScreenshotStreams = new Map();
 
 function getDbConfigPath() {
   return path.join(app.getPath('userData'), 'db-config.json');
@@ -367,11 +368,8 @@ function getScreenshotsForMediaItem(mediaItemId, limit = 100) {
   `).all(mediaItemId, limit);
 }
 
-function getRandomUnseenScreenshots(limit) {
-  const screenshotFolder = getSetting('screenshot_folder');
-  syncScreenshotsFromFolder(screenshotFolder);
-
-  const randomQuery = `
+function getScreenshotWithMediaById(screenshotId) {
+  const row = db.prepare(`
     SELECT
       s.id AS screenshot_id,
       s.media_item_id,
@@ -389,15 +387,27 @@ function getRandomUnseenScreenshots(limit) {
       m.image_list AS media_image_list
     FROM screenshots s
     INNER JOIN media_items m ON m.id = s.media_item_id
-    WHERE s.is_ignored = 0
-      AND s.has_been_displayed = 0
-    ORDER BY RANDOM()
-    LIMIT ?
-  `;
+    WHERE s.id = ?
+  `).get(screenshotId);
 
-  let rows = db.prepare(randomQuery).all(limit);
+  return buildScreenshotRowWithMedia(row);
+}
 
-  if (rows.length === 0) {
+function getRandomUnseenScreenshotIds(limit) {
+  const screenshotCount = db.prepare('SELECT COUNT(*) AS count FROM screenshots').get().count;
+  if (screenshotCount === 0) {
+    const screenshotFolder = getSetting('screenshot_folder');
+    syncScreenshotsFromFolder(screenshotFolder);
+  }
+
+  let ids = db.prepare(`
+    SELECT id
+    FROM screenshots
+    WHERE is_ignored = 0
+      AND has_been_displayed = 0
+  `).all().map((row) => row.id);
+
+  if (ids.length === 0) {
     db.prepare(`
       UPDATE screenshots
       SET has_been_displayed = 0,
@@ -405,10 +415,55 @@ function getRandomUnseenScreenshots(limit) {
       WHERE is_ignored = 0
     `).run();
 
-    rows = db.prepare(randomQuery).all(limit);
+    ids = db.prepare(`
+      SELECT id
+      FROM screenshots
+      WHERE is_ignored = 0
+        AND has_been_displayed = 0
+    `).all().map((row) => row.id);
   }
 
-  return rows.map(buildScreenshotRowWithMedia);
+  for (let index = ids.length - 1; index > 0; index -= 1) {
+    const randomIndex = Math.floor(Math.random() * (index + 1));
+    [ids[index], ids[randomIndex]] = [ids[randomIndex], ids[index]];
+  }
+
+  return ids.slice(0, limit);
+}
+
+function getRandomUnseenScreenshots(limit) {
+  const ids = getRandomUnseenScreenshotIds(limit);
+  return ids
+    .map((id) => getScreenshotWithMediaById(id))
+    .filter(Boolean);
+}
+
+function streamRandomUnseenScreenshots(webContents, requestId, limit) {
+  const screenshotIds = getRandomUnseenScreenshotIds(limit);
+  activeRandomScreenshotStreams.set(requestId, true);
+
+  const sendNext = (index) => {
+    if (!activeRandomScreenshotStreams.get(requestId)) {
+      activeRandomScreenshotStreams.delete(requestId);
+      return;
+    }
+
+    if (index >= screenshotIds.length) {
+      webContents.send('random-screenshot-stream-complete', { requestId, count: screenshotIds.length });
+      activeRandomScreenshotStreams.delete(requestId);
+      return;
+    }
+
+    const item = getScreenshotWithMediaById(screenshotIds[index]);
+    if (item) {
+      webContents.send('random-screenshot-stream-item', { requestId, item, index });
+    }
+
+    setTimeout(() => sendNext(index + 1), 15);
+  };
+
+  setTimeout(() => sendNext(0), 0);
+  return screenshotIds.length;
 }
 
 function markScreenshotDisplayed(screenshotIds = []) {
@@ -741,6 +796,23 @@ ipcMain.handle('get-random-unseen-screenshots', async (event, limit = 60) => {
     console.error('Failed to load random unseen screenshots:', error);
     throw error;
   }
+});
+
+ipcMain.on('start-random-screenshot-stream', async (event, { requestId, limit = 60 }) => {
+  try {
+    const count = streamRandomUnseenScreenshots(event.sender, requestId, limit);
+    console.log(`Started random screenshot stream ${requestId} with ${count} item(s).`);
+  } catch (error) {
+    console.error('Failed to start random screenshot stream:', error);
+    event.sender.send('random-screenshot-stream-error', {
+      requestId,
+      message: error.message || 'Unknown error',
+    });
+  }
+});
+
+ipcMain.on('cancel-random-screenshot-stream', (event, requestId) => {
+  activeRandomScreenshotStreams.delete(requestId);
 });
 
 ipcMain.handle('migrate-screenshots-from-folder', async () => {

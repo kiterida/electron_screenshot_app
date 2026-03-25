@@ -17,6 +17,7 @@ function formatTime(seconds) {
 function App() {
   const videoRef = useRef();
   const canvasRef = useRef(document.createElement('canvas'));
+  const randomLoadSequenceRef = useRef(0);
   const [videoPath, setVideoPath] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
   const [mediaItems, setMediaItems] = useState([]);
@@ -26,9 +27,12 @@ function App() {
   const [isMuted, setIsMuted] = useState(true); // New state for audio toggle
   const [showSearch, setShowSearch] = useState(false);
   const [randomResults, setRandomResults] = useState([]);
+  const [randomLoading, setRandomLoading] = useState(false);
   const [topMediaItemScreenshots, setTopMediaItemScreenshots] = useState([]);
   const [topMediaItemName, setTopMediaItemName] = useState('');
   const [openMediaTable, setOpenMediaTable] = useState(false);
+  const [randomStartupComplete, setRandomStartupComplete] = useState(false);
+  const [mediaItemsLoading, setMediaItemsLoading] = useState(false);
 
   const [screenshotsPerRow, setScreenshotsPerRow] = useState(4);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -47,16 +51,18 @@ function App() {
   });
 
   const refreshRandomResults = async () => {
-    const results = await loadRandomScreenshotsWithMedia();
-    setRandomResults(results);
+    const settings = await window.electronAPI.getAppSettings();
+    const randomImagesCount = Math.max(1, parseInt(settings.random_images, 10) || 60);
+    const loadSequence = Date.now();
+    const previousSequence = randomLoadSequenceRef.current;
+    randomLoadSequenceRef.current = loadSequence;
+    setRandomResults([]);
+    setRandomLoading(true);
+    if (previousSequence) {
+      window.electronAPI.cancelRandomScreenshotStream(previousSequence);
+    }
+    window.electronAPI.startRandomScreenshotStream({ requestId: loadSequence, limit: randomImagesCount });
   };
-
-  useEffect(() => {
-    const fetch = async () => {
-      await refreshRandomResults();
-    };
-    fetch();
-  }, []);
 
 
   const loadSettings = async () => {
@@ -90,7 +96,9 @@ function App() {
         `loadRandomScreenshotsWithMedia: ${selectedResults.length} selected from SQLite, target count ${randomImagesCount}.`
       );
 
-      await recordDisplayedScreenshots(selectedResults.map((result) => result.id));
+      recordDisplayedScreenshots(selectedResults.map((result) => result.id)).catch((recordError) => {
+        console.error('recordDisplayedScreenshots failed:', recordError);
+      });
 
       return selectedResults;
     } catch (error) {
@@ -98,6 +106,64 @@ function App() {
       return [];
     }
   };
+
+  useEffect(() => {
+    const handleItem = (data) => {
+      if (data.requestId !== randomLoadSequenceRef.current) {
+        return;
+      }
+
+      const image = new Image();
+      image.onload = () => {
+        if (data.requestId !== randomLoadSequenceRef.current) {
+          return;
+        }
+        setRandomResults((prev) => [...prev, data.item]);
+      };
+      image.onerror = () => {
+        if (data.requestId !== randomLoadSequenceRef.current) {
+          return;
+        }
+        setRandomResults((prev) => [...prev, data.item]);
+      };
+      image.src = `file://${data.item.file_path}`;
+
+      recordDisplayedScreenshots([data.item.id]).catch((recordError) => {
+        console.error('recordDisplayedScreenshots failed:', recordError);
+      });
+    };
+
+    const handleComplete = (data) => {
+      if (data.requestId !== randomLoadSequenceRef.current) {
+        return;
+      }
+
+      setRandomStartupComplete(true);
+      setRandomLoading(false);
+      console.log(`Random screenshot stream complete: ${data.count} item(s).`);
+    };
+
+    const handleError = (data) => {
+      if (data.requestId !== randomLoadSequenceRef.current) {
+        return;
+      }
+
+      setRandomStartupComplete(true);
+      setRandomLoading(false);
+      console.error('Random screenshot stream failed:', data.message);
+    };
+
+    window.electronAPI.onRandomScreenshotStreamItem(handleItem);
+    window.electronAPI.onRandomScreenshotStreamComplete(handleComplete);
+    window.electronAPI.onRandomScreenshotStreamError(handleError);
+  }, []);
+
+  useEffect(() => {
+    const fetch = async () => {
+      await refreshRandomResults();
+    };
+    fetch();
+  }, []);
 
 
 
@@ -177,6 +243,11 @@ function App() {
 
   useEffect(() => {
     const loadApp = async () => {
+      if (!randomStartupComplete) {
+        return;
+      }
+
+      setMediaItemsLoading(true);
       const settings = await window.electronAPI.getAppSettings();
       setAppSettings(settings);
       setScreenshotsPerRow(settings.default_screens_per_row);
@@ -184,10 +255,11 @@ function App() {
       const items = await window.electronAPI.getMediaItems();
       const enrichedItems = await loadAndEnrichMediaItems(items, settings);
       setMediaItems(enrichedItems);
+      setMediaItemsLoading(false);
     };
 
     loadApp();
-  }, []);
+  }, [randomStartupComplete]);
 
 
   // useEffect(() => {
@@ -570,6 +642,11 @@ function App() {
         </div>
       )}
       <div style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}>
+         {randomLoading && randomResults.length === 0 && (
+          <div style={{ padding: 12, color: '#475569' }}>
+            Loading random screenshots...
+          </div>
+         )}
          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
       {randomResults.map(({ id, file_path: screenshotPath, mediaItem }, i) => (
        
@@ -593,6 +670,11 @@ function App() {
       ))}
       </div>
         </div>
+      {mediaItemsLoading && (
+        <div style={{ padding: '8px 4px', color: '#475569', fontSize: 14 }}>
+          Random screenshots loaded. Media items are now being loaded...
+        </div>
+      )}
       <SettingsDialog open={settingsOpen} onClose={handleSettingsChanged} />
       <SearchDialog
         open={showSearch}
