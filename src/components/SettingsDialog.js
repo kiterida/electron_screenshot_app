@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Box, Button, Dialog, DialogTitle, DialogContent, Stack, TextField, Typography } from '@mui/material';
+import { Box, Button, Checkbox, Dialog, DialogTitle, DialogContent, FormControlLabel, Stack, TextField, Typography } from '@mui/material';
 import IgnoredScreenshotsDialog from './IgnoredScreenshotsDialog';
 
 export default function SettingsDialog({ open, onClose }) {
@@ -7,6 +7,7 @@ export default function SettingsDialog({ open, onClose }) {
     default_screens_per_row: 3,
     screens_load_per_item: 12,
     random_images: 60,
+    enable_random_images_on_startup: 1,
     database_file: '',
     requested_database_file: '',
   });
@@ -24,6 +25,13 @@ export default function SettingsDialog({ open, onClose }) {
 
   const handleChange = (key) => (e) => {
     const value = parseInt(e.target.value, 10);
+    const updated = { ...settings, [key]: value };
+    setSettings(updated);
+    window.electronAPI.updateAppSetting(key, value);
+  };
+
+  const handleCheckboxChange = (key) => (e) => {
+    const value = e.target.checked ? 1 : 0;
     const updated = { ...settings, [key]: value };
     setSettings(updated);
     window.electronAPI.updateAppSetting(key, value);
@@ -101,6 +109,15 @@ export default function SettingsDialog({ open, onClose }) {
               margin="dense"
               value={settings.random_images || ''}
               onChange={handleChange('random_images')}
+            />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={Boolean(settings.enable_random_images_on_startup)}
+                  onChange={handleCheckboxChange('enable_random_images_on_startup')}
+                />
+              }
+              label="Show random images on startup"
             />
             <TextField
               label="SQLite Database File"

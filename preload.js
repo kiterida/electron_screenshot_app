@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveScreenshot: (filePath, buffer) => ipcRenderer.invoke('save-screenshot', { filePath, buffer }),
   addMediaItem: (item) => ipcRenderer.invoke('add-media-item', item),
   getOrCreateMediaItem: (filePath) => ipcRenderer.invoke('get-or-create-media-item', filePath),
+  getMediaItemByFilePath: (filePath) => ipcRenderer.invoke('get-media-item-by-file-path', filePath),
   insertScreenshot: (payload) => ipcRenderer.invoke('insert-screenshot', payload),
   getMediaItems: () => ipcRenderer.invoke('get-media-items'),
   getScreenshotsForMediaItem: (mediaItemId, limit) => ipcRenderer.invoke('get-screenshots-for-media-item', mediaItemId, limit),

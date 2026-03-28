@@ -226,6 +226,39 @@ function getOrCreateMediaItem(filePath) {
   return db.prepare('SELECT * FROM media_items WHERE id = ?').get(result.lastInsertRowid);
 }
 
+function getMediaItemByFilePath(filePath) {
+  const normalizedFilePath = normalizeFilePath(filePath);
+  const mediaName = path.basename(normalizedFilePath);
+
+  let mediaItem = db.prepare(`
+    SELECT * FROM media_items
+    WHERE file_name = ?
+    LIMIT 1
+  `).get(normalizedFilePath);
+
+  if (mediaItem) {
+    return mediaItem;
+  }
+
+  mediaItem = db.prepare(`
+    SELECT * FROM media_items
+    WHERE name = ?
+    LIMIT 1
+  `).get(mediaName);
+
+  if (mediaItem) {
+    db.prepare(`
+      UPDATE media_items
+      SET file_name = COALESCE(NULLIF(file_name, ''), ?)
+      WHERE id = ?
+    `).run(normalizedFilePath, mediaItem.id);
+
+    return db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaItem.id);
+  }
+
+  return null;
+}
+
 function insertScreenshot(mediaItemId, screenshotPath, timestampSeconds) {
   const normalizedPath = normalizeScreenshotPath(screenshotPath);
   const screenshotFileName = path.basename(normalizedPath);
@@ -742,6 +775,7 @@ ipcMain.on('open-video-dialog', async (event) => {
 
 ipcMain.handle('save-screenshot', async (event, { filePath, buffer }) => {
   const data = Buffer.from(buffer.split(',')[1], 'base64');
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, data);
   return true;
 });
@@ -761,6 +795,15 @@ ipcMain.handle('get-or-create-media-item', async (event, filePath) => {
     return mediaItem;
   } catch (error) {
     console.error('Failed to get or create media item:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('get-media-item-by-file-path', async (event, filePath) => {
+  try {
+    return getMediaItemByFilePath(filePath);
+  } catch (error) {
+    console.error('Failed to get media item by file path:', error);
     throw error;
   }
 });

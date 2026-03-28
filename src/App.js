@@ -42,6 +42,8 @@ function App() {
   const [appSettings, setAppSettings] = useState({});
   const [autoPlayOnScreenshotClick, setAutoPlayOnScreenshotClick] = useState(true);
   const [currentMediaItemId, setCurrentMediaItemId] = useState(null);
+  const [isAutoGeneratingScreens, setIsAutoGeneratingScreens] = useState(false);
+  const showRandomImages = appSettings.enable_random_images_on_startup !== 0;
 
   const mapScreenshotRecord = (record) => ({
     id: record.id,
@@ -52,15 +54,26 @@ function App() {
 
   const refreshRandomResults = async () => {
     const settings = await window.electronAPI.getAppSettings();
-    const randomImagesCount = Math.max(1, parseInt(settings.random_images, 10) || 60);
-    const loadSequence = Date.now();
+    const shouldShowRandomImages = settings.enable_random_images_on_startup !== 0;
     const previousSequence = randomLoadSequenceRef.current;
-    randomLoadSequenceRef.current = loadSequence;
-    setRandomResults([]);
-    setRandomLoading(true);
+
     if (previousSequence) {
       window.electronAPI.cancelRandomScreenshotStream(previousSequence);
     }
+
+    if (!shouldShowRandomImages) {
+      randomLoadSequenceRef.current = 0;
+      setRandomResults([]);
+      setRandomLoading(false);
+      setRandomStartupComplete(true);
+      return;
+    }
+
+    const randomImagesCount = Math.max(1, parseInt(settings.random_images, 10) || 60);
+    const loadSequence = Date.now();
+    randomLoadSequenceRef.current = loadSequence;
+    setRandomResults([]);
+    setRandomLoading(true);
     window.electronAPI.startRandomScreenshotStream({ requestId: loadSequence, limit: randomImagesCount });
   };
 
@@ -242,10 +255,10 @@ function App() {
   };
 
   useEffect(() => {
-    const loadApp = async () => {
-      if (!randomStartupComplete) {
-        return;
-      }
+      const loadApp = async () => {
+        if (!randomStartupComplete) {
+          return;
+        }
 
       setMediaItemsLoading(true);
       const settings = await window.electronAPI.getAppSettings();
@@ -297,12 +310,8 @@ function App() {
 
 
   useEffect(() => {
-    window.electronAPI.onVideoSelected(async (path) => {
+    window.electronAPI.onVideoSelected((path) => {
       setVideoPath(path);
-      const mediaItem = await window.electronAPI.getOrCreateMediaItem(path);
-      setCurrentMediaItemId(mediaItem?.id || null);
-      const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(mediaItem.id, 100);
-      setScreenshots(screenshotRows.map(mapScreenshotRecord));
     });
   }, []);
 
@@ -318,15 +327,47 @@ function App() {
   };
 
   useEffect(() => {
-    window.electronAPI.onVideoSelected((path) => {
-      setVideoPath(path);
-    });
-  }, []);
-
-  useEffect(() => {
     if (videoPath) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
+  }, [videoPath]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncLoadedVideoState = async () => {
+      if (!videoPath) {
+        setCurrentMediaItemId(null);
+        setScreenshots([]);
+        return;
+      }
+
+      const mediaItem = await window.electronAPI.getMediaItemByFilePath(videoPath);
+
+      if (cancelled) {
+        return;
+      }
+
+      setCurrentMediaItemId(mediaItem?.id || null);
+
+      if (mediaItem?.id) {
+        const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(mediaItem.id, 100);
+
+        if (cancelled) {
+          return;
+        }
+
+        setScreenshots(screenshotRows.map(mapScreenshotRecord));
+      } else {
+        setScreenshots([]);
+      }
+    };
+
+    syncLoadedVideoState();
+
+    return () => {
+      cancelled = true;
+    };
   }, [videoPath]);
 
   const handleOpen = () => {
@@ -408,6 +449,110 @@ function App() {
       timestampSeconds: video.currentTime,
     });
     setScreenshots((prev) => [...prev, mapScreenshotRecord(screenshotRow)]);
+  };
+
+  const seekVideoToTime = (video, seconds) => {
+    if (!video) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const handleSeeked = () => {
+        cleanup();
+        resolve();
+      };
+
+      const handleError = () => {
+        cleanup();
+        reject(new Error('Failed to seek video for screenshot generation.'));
+      };
+
+      const cleanup = () => {
+        video.removeEventListener('seeked', handleSeeked);
+        video.removeEventListener('error', handleError);
+      };
+
+      video.addEventListener('seeked', handleSeeked, { once: true });
+      video.addEventListener('error', handleError, { once: true });
+      video.currentTime = seconds;
+    });
+  };
+
+  const autoGenerateScreens = async () => {
+    const video = videoRef.current;
+    if (!video || !videoPath || isAutoGeneratingScreens) {
+      return;
+    }
+
+    if (!Number.isFinite(video.duration) || video.duration <= 0) {
+      alert('Please wait for the video metadata to finish loading before generating screenshots.');
+      return;
+    }
+
+    setIsAutoGeneratingScreens(true);
+
+    const originalTime = video.currentTime;
+    const wasPaused = video.paused;
+
+    try {
+      video.pause();
+
+      const rootFolder = await window.electronAPI.getScreenshotFolder(videoPath);
+      const autoFolder = `${rootFolder}/Auto_Generated_Screenshots`;
+      const mediaItem = await window.electronAPI.getOrCreateMediaItem(videoPath);
+      const ctx = canvasRef.current.getContext('2d');
+      const originalFilename = videoPath.split(/[\\/]/).pop();
+      const baseName = originalFilename.replace(/\.(mp4|mov|avi|mpg|mkv|webm)$/i, '');
+      const generatedScreenshots = [];
+
+      canvasRef.current.width = video.videoWidth;
+      canvasRef.current.height = video.videoHeight;
+
+      for (let seconds = 0; seconds < video.duration; seconds += 10) {
+        await seekVideoToTime(video, seconds);
+        ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+
+        const timestamp = formatTime(seconds);
+        const name = `${baseName}_${timestamp}.jpeg`;
+        const filePath = `${autoFolder}/${name}`;
+        const buffer = canvasRef.current.toDataURL('image/jpeg', 1);
+
+        await window.electronAPI.saveScreenshot(filePath, buffer);
+        const screenshotRow = await window.electronAPI.insertScreenshot({
+          mediaItemId: mediaItem.id,
+          screenshotPath: filePath,
+          timestampSeconds: seconds,
+        });
+
+        generatedScreenshots.push(mapScreenshotRecord(screenshotRow));
+      }
+
+      setCurrentMediaItemId(mediaItem?.id || null);
+      setScreenshots((prev) => {
+        const merged = new Map(prev.map((shot) => [shot.id, shot]));
+        generatedScreenshots.forEach((shot) => {
+          merged.set(shot.id, shot);
+        });
+        return Array.from(merged.values()).sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+      });
+
+      alert(`Generated ${generatedScreenshots.length} screenshots in Auto_Generated_Screenshots.`);
+    } catch (error) {
+      console.error('autoGenerateScreens failed:', error);
+      alert('Failed to auto generate screenshots.');
+    } finally {
+      try {
+        await seekVideoToTime(video, originalTime);
+      } catch (seekBackError) {
+        console.warn('Failed to restore original video position after auto generation:', seekBackError);
+      }
+
+      if (!wasPaused) {
+        video.play().catch(() => {});
+      }
+
+      setIsAutoGeneratingScreens(false);
+    }
   };
 
   const seekToScreenshot = (shot) => {
@@ -545,6 +690,9 @@ function App() {
               }}
             >
               <button onClick={takeScreenshot}>Take Screenshot</button>
+              <button onClick={autoGenerateScreens} disabled={isAutoGeneratingScreens || !videoPath}>
+                {isAutoGeneratingScreens ? 'Generating Screens...' : 'Auto Generate Screens'}
+              </button>
               <button onClick={addToDatabase} disabled={Boolean(currentMediaItemId)}>
                 {currentMediaItemId ? 'Already in Database' : 'Add to Database'}
               </button>
@@ -641,13 +789,14 @@ function App() {
           </div>
         </div>
       )}
-      <div style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}>
-         {randomLoading && randomResults.length === 0 && (
-          <div style={{ padding: 12, color: '#475569' }}>
-            Loading random screenshots...
-          </div>
-         )}
-         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
+      {showRandomImages && (
+        <div style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}>
+          {randomLoading && randomResults.length === 0 && (
+            <div style={{ padding: 12, color: '#475569' }}>
+              Loading random screenshots...
+            </div>
+          )}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
       {randomResults.map(({ id, file_path: screenshotPath, mediaItem }, i) => (
        
        
@@ -670,6 +819,7 @@ function App() {
       ))}
       </div>
         </div>
+      )}
       {mediaItemsLoading && (
         <div style={{ padding: '8px 4px', color: '#475569', fontSize: 14 }}>
           Random screenshots loaded. Media items are now being loaded...
@@ -700,11 +850,12 @@ function App() {
               {showItemName && (
                 <h4
                   style={{ cursor: 'pointer' }}
-                  onClick={async () => {
-                    setVideoPath(item.file_name);
-                    const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(item.id, 100);
-                    setScreenshots(screenshotRows.map(mapScreenshotRecord));
-                  }}
+                   onClick={async () => {
+                     setVideoPath(item.file_name);
+                     setCurrentMediaItemId(item.id);
+                     const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(item.id, 100);
+                     setScreenshots(screenshotRows.map(mapScreenshotRecord));
+                   }}
                 >
                   {item.name}
                 </h4>
@@ -720,6 +871,7 @@ function App() {
                       onMouseLeave={() => setHoveredScreenshot(null)}
                       onClick={async () => {
                         setVideoPath(item.file_name);
+                        setCurrentMediaItemId(item.id);
                         const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(item.id, 1000);
                         setScreenshots(screenshotRows.map(mapScreenshotRecord));
                         setTimeout(() => {
