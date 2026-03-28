@@ -5,6 +5,7 @@ import { Tooltip } from '@mui/material';
 import SettingsDialog from './components/SettingsDialog';
 import SearchDialog from './components/SearchDialog';
 import MediaTableDialog from './components/MediaTableDialog';
+import MediaListsDialog from './components/MediaListsDialog';
 
 function formatTime(seconds) {
   const pad = (n) => (n < 10 ? '0' + n : n);
@@ -30,6 +31,9 @@ function App() {
   const [randomLoading, setRandomLoading] = useState(false);
   const [topMediaItemScreenshots, setTopMediaItemScreenshots] = useState([]);
   const [topMediaItemName, setTopMediaItemName] = useState('');
+  const [topMediaItem, setTopMediaItem] = useState(null);
+  const [isSelectingTopScreens, setIsSelectingTopScreens] = useState(false);
+  const [selectedTopScreenSlot, setSelectedTopScreenSlot] = useState(null);
   const [openMediaTable, setOpenMediaTable] = useState(false);
   const [randomStartupComplete, setRandomStartupComplete] = useState(false);
   const [mediaItemsLoading, setMediaItemsLoading] = useState(false);
@@ -43,7 +47,13 @@ function App() {
   const [autoPlayOnScreenshotClick, setAutoPlayOnScreenshotClick] = useState(true);
   const [currentMediaItemId, setCurrentMediaItemId] = useState(null);
   const [isAutoGeneratingScreens, setIsAutoGeneratingScreens] = useState(false);
+  const [showVideoPlayer, setShowVideoPlayer] = useState(true);
+  const [mediaLists, setMediaLists] = useState([]);
+  const [activeMediaListId, setActiveMediaListId] = useState('');
+  const [mediaListsDialogOpen, setMediaListsDialogOpen] = useState(false);
+  const [listActionMessage, setListActionMessage] = useState('');
   const showRandomImages = appSettings.enable_random_images_on_startup !== 0;
+  const activeMediaList = mediaLists.find((list) => Number(list.id) === Number(activeMediaListId)) || null;
 
   const mapScreenshotRecord = (record) => ({
     id: record.id,
@@ -51,6 +61,74 @@ function App() {
     path: record.file_path,
     timestampSeconds: record.timestamp_seconds,
   });
+
+  const parseMediaImageList = (imageListValue) => {
+    if (!imageListValue) {
+      return Array(8).fill(null);
+    }
+
+    try {
+      const parsed = JSON.parse(imageListValue);
+      if (!Array.isArray(parsed)) {
+        return Array(8).fill(null);
+      }
+
+      const normalized = parsed.slice(0, 8).map((value) => {
+        if (value == null) {
+          return null;
+        }
+
+        const parsedValue = Number(value);
+        return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
+      });
+
+      while (normalized.length < 8) {
+        normalized.push(null);
+      }
+
+      return normalized;
+    } catch (error) {
+      return Array(8).fill(null);
+    }
+  };
+
+  const orderScreenshotsByImageList = (screenshotRows, imageListValue) => {
+    const preferredIds = parseMediaImageList(imageListValue).filter(Boolean);
+    if (preferredIds.length === 0 || !Array.isArray(screenshotRows) || screenshotRows.length === 0) {
+      return screenshotRows;
+    }
+
+    const screenshotMap = new Map(screenshotRows.map((row) => [Number(row.id), row]));
+    const ordered = [];
+    const usedIds = new Set();
+
+    preferredIds.forEach((id) => {
+      const row = screenshotMap.get(id);
+      if (row && !usedIds.has(id)) {
+        ordered.push(row);
+        usedIds.add(id);
+      }
+    });
+
+    screenshotRows.forEach((row) => {
+      const id = Number(row.id);
+      if (!usedIds.has(id)) {
+        ordered.push(row);
+      }
+    });
+
+    return ordered;
+  };
+
+  const getTopScreenSlots = () => {
+    const selectedIds = parseMediaImageList(topMediaItem?.image_list);
+    const screenshotMap = new Map(topMediaItemScreenshots.map((row) => [Number(row.id), row]));
+
+    return Array.from({ length: 8 }, (_, index) => {
+      const screenshotId = selectedIds[index];
+      return screenshotId ? screenshotMap.get(Number(screenshotId)) || null : null;
+    });
+  };
 
   const refreshRandomResults = async () => {
     const settings = await window.electronAPI.getAppSettings();
@@ -82,12 +160,43 @@ function App() {
     const settings = await window.electronAPI.getAppSettings();
     console.log("loadSettings:", settings);
     setAppSettings(settings);
+    return settings;
+  };
+
+  const refreshStartupMediaItems = async (settingsOverride) => {
+    const settings = settingsOverride || await window.electronAPI.getAppSettings();
+    setAppSettings(settings);
+    setScreenshotsPerRow(settings.default_screens_per_row);
+    setMediaItemsLoading(true);
+
+    try {
+      const items = await loadStartupMediaItems(settings);
+      const enrichedItems = await loadAndEnrichMediaItems(items, settings);
+      setMediaItems(enrichedItems);
+    } finally {
+      setMediaItemsLoading(false);
+    }
+  };
+
+  const refreshMediaLists = async (preferredActiveListId) => {
+    const lists = await window.electronAPI.getMediaLists();
+    setMediaLists(lists);
+
+    setActiveMediaListId((currentActiveListId) => {
+      const preferred = preferredActiveListId || currentActiveListId;
+      if (preferred && lists.some((list) => Number(list.id) === Number(preferred))) {
+        return preferred;
+      }
+
+      return '';
+    });
   };
 
   // Call this after dialog closes
-  const handleSettingsChanged = () => {
-    loadSettings();
-    refreshRandomResults();
+  const handleSettingsChanged = async () => {
+    const settings = await loadSettings();
+    await refreshRandomResults();
+    await refreshStartupMediaItems(settings);
     setSettingsOpen(false);
   };
 
@@ -174,6 +283,7 @@ function App() {
   useEffect(() => {
     const fetch = async () => {
       await refreshRandomResults();
+      await refreshMediaLists();
     };
     fetch();
   }, []);
@@ -196,11 +306,29 @@ function App() {
       if (e.ctrlKey && e.key === 'f') {
         e.preventDefault();
         setShowSearch(true);
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        if (isSelectingTopScreens) {
+          e.preventDefault();
+          setIsSelectingTopScreens(false);
+          setSelectedTopScreenSlot(null);
+          return;
+        }
+
+        if (topMediaItemScreenshots.length > 0) {
+          e.preventDefault();
+          setTopMediaItemScreenshots([]);
+          setTopMediaItemName('');
+          setTopMediaItem(null);
+          setSelectedTopScreenSlot(null);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [isSelectingTopScreens, topMediaItemScreenshots.length]);
 
   useEffect(() => {
     const handleWheel = (e) => {
@@ -235,6 +363,59 @@ function App() {
     return enrichedItems;
   };
 
+  const syncMediaItemImageListState = (updatedMediaItem) => {
+    if (!updatedMediaItem?.id) {
+      return;
+    }
+
+    setTopMediaItem((prev) => {
+      if (!prev || Number(prev.id) !== Number(updatedMediaItem.id)) {
+        return prev;
+      }
+
+      return { ...prev, ...updatedMediaItem };
+    });
+
+    setTopMediaItemScreenshots((prev) => orderScreenshotsByImageList([...prev], updatedMediaItem.image_list));
+
+    setMediaItems((prev) =>
+      prev.map((item) => {
+        if (Number(item.id) !== Number(updatedMediaItem.id)) {
+          return item;
+        }
+
+        return {
+          ...item,
+          ...updatedMediaItem,
+          screenshots: orderScreenshotsByImageList([...(item.screenshots || [])], updatedMediaItem.image_list),
+        };
+      })
+    );
+
+    if (Number(currentMediaItemId) === Number(updatedMediaItem.id)) {
+      setScreenshots((prev) => orderScreenshotsByImageList([...prev], updatedMediaItem.image_list));
+    }
+  };
+
+  const loadStartupMediaItems = async (settings) => {
+    const startupMediaList = settings.startup_media_list || 'all';
+
+    if (startupMediaList === 'none') {
+      return [];
+    }
+
+    if (typeof startupMediaList === 'string' && startupMediaList.startsWith('list:')) {
+      const listId = startupMediaList.split(':')[1];
+      if (!listId) {
+        return [];
+      }
+
+      return window.electronAPI.getMediaItemsForList(listId);
+    }
+
+    return window.electronAPI.getMediaItems();
+  };
+
   const showMediaItemScreenshotsAtTop = async (mediaItemId) => {
     if (!mediaItemId) {
       return;
@@ -243,6 +424,7 @@ function App() {
     const mediaItem = await window.electronAPI.getMediaItemById(mediaItemId);
     const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(mediaItemId, 5000);
 
+    setTopMediaItem(mediaItem);
     setTopMediaItemName(mediaItem?.name || mediaItem?.file_name || 'Media Item');
     setTopMediaItemScreenshots(
       screenshotRows.map((row) => ({
@@ -254,21 +436,66 @@ function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const closeTopMediaItemScreenshots = () => {
+    setTopMediaItemScreenshots([]);
+    setTopMediaItemName('');
+    setTopMediaItem(null);
+    setIsSelectingTopScreens(false);
+    setSelectedTopScreenSlot(null);
+  };
+
+  const saveTopScreenSlots = async (nextIds) => {
+    if (!topMediaItem?.id) {
+      return;
+    }
+
+    const updatedMediaItem = await window.electronAPI.updateMediaItemImageList({
+      mediaItemId: topMediaItem.id,
+      imageList: nextIds,
+    });
+
+    syncMediaItemImageListState(updatedMediaItem);
+  };
+
+  const handleTopScreenshotSelected = async (screenshotId) => {
+    if (!isSelectingTopScreens || !topMediaItem?.id) {
+      return false;
+    }
+
+    const nextIds = [...parseMediaImageList(topMediaItem.image_list)];
+    const targetIndex =
+      selectedTopScreenSlot != null
+        ? selectedTopScreenSlot
+        : nextIds.findIndex((value) => !value);
+
+    if (targetIndex === -1) {
+      alert('All 8 slots are full. Click a slot first if you want to replace one.');
+      return true;
+    }
+
+    nextIds[targetIndex] = Number(screenshotId);
+    await saveTopScreenSlots(nextIds);
+
+    if (selectedTopScreenSlot != null) {
+      setSelectedTopScreenSlot(null);
+    }
+
+    return true;
+  };
+
+  const clearTopScreenSlot = async (slotIndex) => {
+    const nextIds = [...parseMediaImageList(topMediaItem?.image_list)];
+    nextIds[slotIndex] = null;
+    await saveTopScreenSlots(nextIds);
+    setSelectedTopScreenSlot(slotIndex);
+  };
+
   useEffect(() => {
       const loadApp = async () => {
         if (!randomStartupComplete) {
           return;
         }
-
-      setMediaItemsLoading(true);
-      const settings = await window.electronAPI.getAppSettings();
-      setAppSettings(settings);
-      setScreenshotsPerRow(settings.default_screens_per_row);
-
-      const items = await window.electronAPI.getMediaItems();
-      const enrichedItems = await loadAndEnrichMediaItems(items, settings);
-      setMediaItems(enrichedItems);
-      setMediaItemsLoading(false);
+      await refreshStartupMediaItems();
     };
 
     loadApp();
@@ -322,6 +549,40 @@ function App() {
     alert('Media item added to database!');
   };
 
+  const addMediaItemToActiveList = async (mediaItemId, mediaName = 'media item') => {
+    if (!activeMediaListId) {
+      return false;
+    }
+
+    if (!mediaItemId) {
+      alert('This screenshot does not have a parent media item to add.');
+      return true;
+    }
+
+    await window.electronAPI.addMediaItemToList({
+      listId: activeMediaListId,
+      mediaItemId,
+    });
+    await refreshMediaLists(activeMediaListId);
+    setListActionMessage(`Added ${mediaName} to "${activeMediaList?.name || 'Active List'}".`);
+    return true;
+  };
+
+  const handleScreenshotInteraction = async ({
+    mediaItemId,
+    mediaName,
+    onDefault,
+  }) => {
+    const handledByListMode = await addMediaItemToActiveList(mediaItemId, mediaName);
+    if (handledByListMode) {
+      return;
+    }
+
+    if (onDefault) {
+      await onDefault();
+    }
+  };
+
   const openMediaFile = (path) => {
     setVideoPath(path);
   };
@@ -371,6 +632,10 @@ function App() {
   }, [videoPath]);
 
   const handleOpen = () => {
+    if (!showVideoPlayer) {
+      setShowVideoPlayer(true);
+      window.electronAPI.setVideoPlayerVisibility(true);
+    }
     window.electronAPI.openVideoDialog();
   };
 
@@ -621,11 +886,66 @@ function App() {
     window.electronAPI.onOpenMediaTable(handleOpenMediaTable);
   }, []);
 
+  useEffect(() => {
+    window.electronAPI.onVideoPlayerVisibilityChanged((isVisible) => {
+      setShowVideoPlayer(Boolean(isVisible));
+    });
+  }, []);
+
 
 
   return (
     <div style={{ padding: 2 }}>
-      {videoPath && (
+      <div
+        style={{
+          marginBottom: 12,
+          padding: 12,
+          border: '1px solid #d6dbe3',
+          borderRadius: 14,
+          background: '#f8fafc',
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 10,
+        }}
+      >
+        <strong>Media Lists</strong>
+        <select
+          value={activeMediaListId}
+          onChange={(e) => {
+            setActiveMediaListId(e.target.value);
+            setListActionMessage('');
+          }}
+          style={{ minWidth: 220, padding: '8px 10px' }}
+        >
+          <option value="">No active list</option>
+          {mediaLists.map((list) => (
+            <option key={list.id} value={list.id}>
+              {list.name} ({list.item_count || 0})
+            </option>
+          ))}
+        </select>
+        <button onClick={() => setMediaListsDialogOpen(true)}>Manage Lists</button>
+        {activeMediaListId && (
+          <button
+            onClick={() => {
+              setActiveMediaListId('');
+              setListActionMessage('');
+            }}
+          >
+            Stop Editing List
+          </button>
+        )}
+        <span style={{ color: '#475569', fontSize: 13 }}>
+          {activeMediaList
+            ? `Edit mode is active for "${activeMediaList.name}". Click any screenshot to add its parent media item to this list.`
+            : 'Select a list to make screenshot clicks add parent media items to it.'}
+        </span>
+        {listActionMessage && (
+          <span style={{ color: '#166534', fontSize: 13 }}>{listActionMessage}</span>
+        )}
+      </div>
+      {videoPath && showVideoPlayer && (
         <div
           style={{
             marginBottom: 12,
@@ -641,21 +961,35 @@ function App() {
               padding: '16px 18px 10px',
               borderBottom: '1px solid rgba(148, 163, 184, 0.25)',
               background: 'rgba(255, 255, 255, 0.72)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'flex-start',
+              gap: 12,
             }}
           >
-            <div style={{ fontSize: 22, fontWeight: 700, color: '#0f172a' }}>
-              {currentVideoName || 'Selected Video'}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 22, fontWeight: 700, color: '#0f172a' }}>
+                {currentVideoName || 'Selected Video'}
+              </div>
+              <div
+                style={{
+                  marginTop: 4,
+                  fontSize: 13,
+                  color: '#475569',
+                  wordBreak: 'break-all',
+                }}
+              >
+                {videoPath}
+              </div>
             </div>
-            <div
-              style={{
-                marginTop: 4,
-                fontSize: 13,
-                color: '#475569',
-                wordBreak: 'break-all',
+            <button
+              onClick={() => {
+                setShowVideoPlayer(false);
+                window.electronAPI.setVideoPlayerVisibility(false);
               }}
             >
-              {videoPath}
-            </div>
+              Hide Video
+            </button>
           </div>
 
           <div style={{ padding: 16 }}>
@@ -743,7 +1077,13 @@ function App() {
                         cursor: 'pointer',
                         boxShadow: '0 4px 14px rgba(15, 23, 42, 0.12)',
                       }}
-                      onClick={() => seekToScreenshot(shot)}
+                      onClick={() =>
+                        handleScreenshotInteraction({
+                          mediaItemId: currentMediaItemId,
+                          mediaName: currentVideoName || shot.name,
+                          onDefault: async () => seekToScreenshot(shot),
+                        })
+                      }
                       alt={shot.name}
                     />
                   ))}
@@ -755,19 +1095,116 @@ function App() {
       )}
 
       <MediaTableDialog open={openMediaTable} onClose={() => setOpenMediaTable(false)} />
+      <MediaListsDialog
+        open={mediaListsDialogOpen}
+        onClose={() => setMediaListsDialogOpen(false)}
+        lists={mediaLists}
+        activeListId={activeMediaListId}
+        onSetActiveList={(listId) => {
+          setActiveMediaListId(listId);
+          setListActionMessage('');
+        }}
+        onListsChanged={refreshMediaLists}
+      />
       {topMediaItemScreenshots.length > 0 && (
-        <div style={{ border: '6px solid #ccc', margin: 0, padding: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 8 }}>
+        <div style={{ border: '6px solid #ccc', margin: 0, padding: 0, position: 'relative' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: 8, gap: 10, flexWrap: 'wrap' }}>
             <strong>{topMediaItemName} Screenshots ({topMediaItemScreenshots.length})</strong>
-            <button
-              onClick={() => {
-                setTopMediaItemScreenshots([]);
-                setTopMediaItemName('');
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => {
+                  setIsSelectingTopScreens((prev) => {
+                    const next = !prev;
+                    setSelectedTopScreenSlot(null);
+                    return next;
+                  });
+                }}
+              >
+                {isSelectingTopScreens ? 'Done Selecting Top 8' : 'Select Top 8 Screens'}
+              </button>
+              <button
+                onClick={closeTopMediaItemScreenshots}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+          {isSelectingTopScreens && (
+            <div
+              style={{
+                position: 'sticky',
+                top: 8,
+                zIndex: 3,
+                margin: '0 8px 8px',
+                padding: 12,
+                borderRadius: 14,
+                border: '1px solid rgba(148, 163, 184, 0.35)',
+                background: 'rgba(255,255,255,0.96)',
+                boxShadow: '0 10px 28px rgba(15, 23, 42, 0.12)',
               }}
             >
-              Clear
-            </button>
-          </div>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>Top 8 Screens</div>
+              <div style={{ fontSize: 13, color: '#475569', marginBottom: 10 }}>
+                Click a slot to target it, then click one of the screenshots below. Empty slots fill in order by default.
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(120px, 1fr))', gap: 10 }}>
+                {getTopScreenSlots().map((slotShot, index) => (
+                  <div
+                    key={`top-slot-${index}`}
+                    onClick={() => setSelectedTopScreenSlot((prev) => (prev === index ? null : index))}
+                    style={{
+                      position: 'relative',
+                      border: selectedTopScreenSlot === index ? '2px solid #2563eb' : '1px dashed #94a3b8',
+                      borderRadius: 10,
+                      padding: 6,
+                      minHeight: 92,
+                      background: selectedTopScreenSlot === index ? '#eff6ff' : '#f8fafc',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#334155', marginBottom: 4 }}>
+                      Slot {index + 1}
+                    </div>
+                    {slotShot ? (
+                      <>
+                        <img
+                          src={`file://${slotShot.file_path || slotShot.path}`}
+                          alt={slotShot.file_name || slotShot.name || `slot-${index + 1}`}
+                          style={{ width: '100%', height: 64, objectFit: 'cover', borderRadius: 8, display: 'block' }}
+                        />
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            clearTopScreenSlot(index);
+                          }}
+                          style={{
+                            position: 'absolute',
+                            right: 8,
+                            top: 8,
+                            width: 22,
+                            height: 22,
+                            borderRadius: '50%',
+                            border: 'none',
+                            background: '#dc2626',
+                            color: '#fff',
+                            cursor: 'pointer',
+                            lineHeight: 1,
+                          }}
+                          aria-label={`Clear slot ${index + 1}`}
+                        >
+                          x
+                        </button>
+                      </>
+                    ) : (
+                      <div style={{ height: 64, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: 13 }}>
+                        Empty
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 0 }}>
             {topMediaItemScreenshots.map(({ id, file_path: screenshotPath, mediaItem }, i) => (
               <div
@@ -783,7 +1220,22 @@ function App() {
                   });
                 }}
               >
-                <img src={`file://${screenshotPath}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }} />
+                <img
+                  src={`file://${screenshotPath}`}
+                  alt=""
+                  style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+                  onClick={async () => {
+                    const handledByTopSelector = await handleTopScreenshotSelected(id);
+                    if (handledByTopSelector) {
+                      return;
+                    }
+
+                    handleScreenshotInteraction({
+                      mediaItemId: mediaItem?.id,
+                      mediaName: mediaItem?.name || mediaItem?.file_name || 'media item',
+                    });
+                  }}
+                />
               </div>
             ))}
           </div>
@@ -813,7 +1265,17 @@ function App() {
               });
             }}
           >
-          <img src={`file://${screenshotPath}`} alt=""  style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }} />
+          <img
+            src={`file://${screenshotPath}`}
+            alt=""
+            style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
+            onClick={() =>
+              handleScreenshotInteraction({
+                mediaItemId: mediaItem?.id,
+                mediaName: mediaItem?.name || mediaItem?.file_name || 'media item',
+              })
+            }
+          />
           </div>
         
       ))}
@@ -869,18 +1331,24 @@ function App() {
                       style={{ flex: '1 0 auto', height: 'auto', maxWidth: `calc(100% / ${screenshotsPerRow})`, objectFit: 'contain', cursor: 'pointer' }}
                       onMouseEnter={() => setHoveredScreenshot({ video: item.file_name, time: seconds, index: `${idx}-${i}` })}
                       onMouseLeave={() => setHoveredScreenshot(null)}
-                      onClick={async () => {
-                        setVideoPath(item.file_name);
-                        setCurrentMediaItemId(item.id);
-                        const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(item.id, 1000);
-                        setScreenshots(screenshotRows.map(mapScreenshotRecord));
-                        setTimeout(() => {
-                          if (videoRef.current) {
-                            videoRef.current.currentTime = seconds;
-                            videoRef.current.play();
-                          }
-                        }, 100);
-                      }}
+                      onClick={() =>
+                        handleScreenshotInteraction({
+                          mediaItemId: item.id,
+                          mediaName: item.name || item.file_name,
+                          onDefault: async () => {
+                            setVideoPath(item.file_name);
+                            setCurrentMediaItemId(item.id);
+                            const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(item.id, 1000);
+                            setScreenshots(screenshotRows.map(mapScreenshotRecord));
+                            setTimeout(() => {
+                              if (videoRef.current) {
+                                videoRef.current.currentTime = seconds;
+                                videoRef.current.play();
+                              }
+                            }, 100);
+                          },
+                        })
+                      }
                     >
                       {(playOnHover && hoveredScreenshot?.index === `${idx}-${i}`) ? (
                         <video

@@ -115,6 +115,31 @@ function ensureDatabaseSchema(database) {
       ignored_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `).run();
+
+  database.prepare(`
+    CREATE TABLE IF NOT EXISTS media_lists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  database.prepare(`
+    CREATE TABLE IF NOT EXISTS media_list_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      list_id INTEGER NOT NULL,
+      media_item_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(list_id, media_item_id),
+      FOREIGN KEY (list_id) REFERENCES media_lists(id) ON DELETE CASCADE,
+      FOREIGN KEY (media_item_id) REFERENCES media_items(id) ON DELETE CASCADE
+    )
+  `).run();
+
+  database.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_media_list_items_list_id
+    ON media_list_items (list_id)
+  `).run();
 }
 
 function normalizeScreenshotPath(filePath) {
@@ -259,6 +284,154 @@ function getMediaItemByFilePath(filePath) {
   return null;
 }
 
+function getMediaLists() {
+  return db.prepare(`
+    SELECT
+      ml.id,
+      ml.name,
+      ml.created_at,
+      COUNT(mli.id) AS item_count
+    FROM media_lists ml
+    LEFT JOIN media_list_items mli ON mli.list_id = ml.id
+    GROUP BY ml.id
+    ORDER BY LOWER(ml.name) ASC
+  `).all();
+}
+
+function parseMediaImageList(imageListValue) {
+  if (!imageListValue) {
+    return Array(8).fill(null);
+  }
+
+  try {
+    const parsed = JSON.parse(imageListValue);
+    if (!Array.isArray(parsed)) {
+      return Array(8).fill(null);
+    }
+
+    const normalized = parsed.slice(0, 8).map((value) => {
+      if (value == null) {
+        return null;
+      }
+
+      const parsedValue = Number(value);
+      return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
+    });
+
+    while (normalized.length < 8) {
+      normalized.push(null);
+    }
+
+    return normalized;
+  } catch (error) {
+    return Array(8).fill(null);
+  }
+}
+
+function orderScreenshotsByMediaImageList(screenshots, imageListValue) {
+  const preferredIds = parseMediaImageList(imageListValue).filter(Boolean);
+  if (preferredIds.length === 0 || !Array.isArray(screenshots) || screenshots.length === 0) {
+    return screenshots;
+  }
+
+  const screenshotMap = new Map(screenshots.map((screenshot) => [Number(screenshot.id), screenshot]));
+  const ordered = [];
+  const usedIds = new Set();
+
+  preferredIds.forEach((id) => {
+    const screenshot = screenshotMap.get(id);
+    if (screenshot && !usedIds.has(id)) {
+      ordered.push(screenshot);
+      usedIds.add(id);
+    }
+  });
+
+  screenshots.forEach((screenshot) => {
+    const id = Number(screenshot.id);
+    if (!usedIds.has(id)) {
+      ordered.push(screenshot);
+    }
+  });
+
+  return ordered;
+}
+
+function updateMediaItemImageList(mediaItemId, imageList) {
+  const sanitized = Array.isArray(imageList)
+    ? imageList.slice(0, 8).map((value) => {
+        if (value == null) {
+          return null;
+        }
+
+        const parsedValue = Number(value);
+        return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : null;
+      })
+    : [];
+
+  db.prepare(`
+    UPDATE media_items
+    SET image_list = ?
+    WHERE id = ?
+  `).run(JSON.stringify(sanitized), mediaItemId);
+
+  return db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaItemId);
+}
+
+function createMediaList(name) {
+  const trimmedName = (name || '').trim();
+  if (!trimmedName) {
+    throw new Error('List name is required.');
+  }
+
+  const result = db.prepare(`
+    INSERT INTO media_lists (name)
+    VALUES (?)
+  `).run(trimmedName);
+
+  return db.prepare('SELECT * FROM media_lists WHERE id = ?').get(result.lastInsertRowid);
+}
+
+function deleteMediaList(listId) {
+  return db.prepare('DELETE FROM media_lists WHERE id = ?').run(listId).changes;
+}
+
+function addMediaItemToList(listId, mediaItemId) {
+  db.prepare(`
+    INSERT OR IGNORE INTO media_list_items (list_id, media_item_id)
+    VALUES (?, ?)
+  `).run(listId, mediaItemId);
+
+  return db.prepare(`
+    SELECT
+      ml.id,
+      ml.name,
+      COUNT(mli.id) AS item_count
+    FROM media_lists ml
+    LEFT JOIN media_list_items mli ON mli.list_id = ml.id
+    WHERE ml.id = ?
+    GROUP BY ml.id
+  `).get(listId);
+}
+
+function removeMediaItemFromList(listId, mediaItemId) {
+  return db.prepare(`
+    DELETE FROM media_list_items
+    WHERE list_id = ? AND media_item_id = ?
+  `).run(listId, mediaItemId).changes;
+}
+
+function getMediaItemsForList(listId) {
+  return db.prepare(`
+    SELECT
+      m.*,
+      mli.created_at AS added_to_list_at
+    FROM media_list_items mli
+    INNER JOIN media_items m ON m.id = mli.media_item_id
+    WHERE mli.list_id = ?
+    ORDER BY mli.created_at DESC, m.id DESC
+  `).all(listId);
+}
+
 function insertScreenshot(mediaItemId, screenshotPath, timestampSeconds) {
   const normalizedPath = normalizeScreenshotPath(screenshotPath);
   const screenshotFileName = path.basename(normalizedPath);
@@ -392,13 +565,20 @@ function syncScreenshotsFromFolder(folder) {
 }
 
 function getScreenshotsForMediaItem(mediaItemId, limit = 100) {
-  return db.prepare(`
+  const screenshots = db.prepare(`
     SELECT *
     FROM screenshots
     WHERE media_item_id = ?
     ORDER BY COALESCE(timestamp_seconds, 0), id
-    LIMIT ?
-  `).all(mediaItemId, limit);
+  `).all(mediaItemId);
+
+  const mediaItem = db.prepare(`
+    SELECT image_list
+    FROM media_items
+    WHERE id = ?
+  `).get(mediaItemId);
+
+  return orderScreenshotsByMediaImageList(screenshots, mediaItem?.image_list).slice(0, limit);
 }
 
 function getScreenshotWithMediaById(screenshotId) {
@@ -1069,6 +1249,69 @@ ipcMain.handle('get-all-media-items', async () => {
   return rows;
 });
 
+ipcMain.handle('get-media-lists', async () => {
+  try {
+    return getMediaLists();
+  } catch (error) {
+    console.error('Failed to load media lists:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('create-media-list', async (event, name) => {
+  try {
+    return createMediaList(name);
+  } catch (error) {
+    console.error('Failed to create media list:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('delete-media-list', async (event, listId) => {
+  try {
+    return deleteMediaList(listId);
+  } catch (error) {
+    console.error('Failed to delete media list:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('add-media-item-to-list', async (event, { listId, mediaItemId }) => {
+  try {
+    return addMediaItemToList(listId, mediaItemId);
+  } catch (error) {
+    console.error('Failed to add media item to list:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('remove-media-item-from-list', async (event, { listId, mediaItemId }) => {
+  try {
+    return removeMediaItemFromList(listId, mediaItemId);
+  } catch (error) {
+    console.error('Failed to remove media item from list:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('get-media-items-for-list', async (event, listId) => {
+  try {
+    return getMediaItemsForList(listId);
+  } catch (error) {
+    console.error('Failed to load media items for list:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('update-media-item-image-list', async (event, { mediaItemId, imageList }) => {
+  try {
+    return updateMediaItemImageList(mediaItemId, imageList);
+  } catch (error) {
+    console.error('Failed to update media item image list:', error);
+    throw error;
+  }
+});
+
 
 
 
@@ -1158,8 +1401,8 @@ ipcMain.on('show-context-menu', (event, payload = {}) => {
   menu.popup(BrowserWindow.fromWebContents(event.sender));
 });
 
-let settingsWindow = null;
 let mainWindow = null;
+let isVideoPlayerVisible = true;
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -1174,6 +1417,89 @@ function createMainWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'build', 'index.html'));
+}
+
+function createApplicationMenu() {
+  const template = [
+    ...(process.platform === 'darwin'
+      ? [{
+          label: app.name,
+          submenu: [
+            { role: 'about' },
+            { type: 'separator' },
+            {
+              label: 'Settings',
+              accelerator: 'Cmd+,',
+              click: () => openSettingsWindow(),
+            },
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' },
+            { role: 'hideOthers' },
+            { role: 'unhide' },
+            { type: 'separator' },
+            { role: 'quit' },
+          ],
+        }]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Settings',
+          accelerator: process.platform === 'darwin' ? 'Cmd+,' : 'Ctrl+,',
+          click: () => openSettingsWindow(),
+        },
+        { type: 'separator' },
+        { role: process.platform === 'darwin' ? 'close' : 'quit' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          id: 'toggle-video-player',
+          label: 'Show Video Player',
+          type: 'checkbox',
+          checked: isVideoPlayerVisible,
+          click: (menuItem) => {
+            isVideoPlayerVisible = menuItem.checked;
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('video-player-visibility-changed', isVideoPlayerVisible);
+            }
+          },
+        },
+        { type: 'separator' },
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      role: 'windowMenu',
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function syncVideoPlayerMenuItem() {
+  const menu = Menu.getApplicationMenu();
+  if (!menu) {
+    return;
+  }
+
+  const menuItem = menu.getMenuItemById('toggle-video-player');
+  if (menuItem) {
+    menuItem.checked = isVideoPlayerVisible;
+  }
 }
 
 async function promptForDatabasePath() {
@@ -1244,37 +1570,28 @@ async function ensureDatabaseReady() {
 }
 
 function openSettingsWindow() {
-  if (settingsWindow) {
-    settingsWindow.focus();
-    return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.focus();
+    mainWindow.webContents.send('context-menu-command', { command: 'open-settings-window' });
   }
-
-  settingsWindow = new BrowserWindow({
-    width: 400,
-    height: 300,
-    parent: BrowserWindow.getFocusedWindow() || mainWindow,
-    modal: true,
-    show: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-
-  settingsWindow.loadFile(path.join(__dirname, 'build', 'settings.html'));
-
-  settingsWindow.once('ready-to-show', () => {
-    settingsWindow.show();
-  });
-
-  settingsWindow.on('closed', () => {
-    settingsWindow = null;
-  });
 }
 
 ipcMain.on('open-settings-window', () => {
   openSettingsWindow();
+});
+
+ipcMain.on('set-video-player-visibility', (event, isVisible) => {
+  isVideoPlayerVisible = Boolean(isVisible);
+  syncVideoPlayerMenuItem();
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('video-player-visibility-changed', isVideoPlayerVisible);
+  } else {
+    event.sender.send('video-player-visibility-changed', isVideoPlayerVisible);
+  }
 });
 
 ipcMain.on('open-media-table', (event) => {
@@ -1296,6 +1613,7 @@ app.whenReady().then(async () => {
     return;
   }
 
+  createApplicationMenu();
   createMainWindow();
 });
 

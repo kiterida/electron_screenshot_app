@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Box, Button, Checkbox, Dialog, DialogTitle, DialogContent, FormControlLabel, Stack, TextField, Typography } from '@mui/material';
+import { Box, Button, Checkbox, Dialog, DialogTitle, DialogContent, FormControlLabel, MenuItem, Stack, TextField, Typography } from '@mui/material';
 import IgnoredScreenshotsDialog from './IgnoredScreenshotsDialog';
 
 export default function SettingsDialog({ open, onClose }) {
@@ -8,16 +8,21 @@ export default function SettingsDialog({ open, onClose }) {
     screens_load_per_item: 12,
     random_images: 60,
     enable_random_images_on_startup: 1,
+    startup_media_list: 'all',
     database_file: '',
     requested_database_file: '',
   });
   const [migrationResult, setMigrationResult] = useState(null);
   const [ignoredDialogOpen, setIgnoredDialogOpen] = useState(false);
+  const [mediaLists, setMediaLists] = useState([]);
 
   useEffect(() => {
     if (open) {
       window.electronAPI.getAppSettings().then((loadedSettings) => {
         setSettings((prev) => ({ ...prev, ...loadedSettings }));
+      });
+      window.electronAPI.getMediaLists().then((lists) => {
+        setMediaLists(lists);
       });
       setMigrationResult(null);
     }
@@ -32,6 +37,13 @@ export default function SettingsDialog({ open, onClose }) {
 
   const handleCheckboxChange = (key) => (e) => {
     const value = e.target.checked ? 1 : 0;
+    const updated = { ...settings, [key]: value };
+    setSettings(updated);
+    window.electronAPI.updateAppSetting(key, value);
+  };
+
+  const handleSelectChange = (key) => (e) => {
+    const value = e.target.value;
     const updated = { ...settings, [key]: value };
     setSettings(updated);
     window.electronAPI.updateAppSetting(key, value);
@@ -119,6 +131,22 @@ export default function SettingsDialog({ open, onClose }) {
               }
               label="Show random images on startup"
             />
+            <TextField
+              select
+              label="Main List To Load At Startup"
+              fullWidth
+              margin="dense"
+              value={settings.startup_media_list || 'all'}
+              onChange={handleSelectChange('startup_media_list')}
+            >
+              <MenuItem value="all">All (Default)</MenuItem>
+              <MenuItem value="none">None - Don't load any list at startup</MenuItem>
+              {mediaLists.map((list) => (
+                <MenuItem key={list.id} value={`list:${list.id}`}>
+                  {list.name}
+                </MenuItem>
+              ))}
+            </TextField>
             <TextField
               label="SQLite Database File"
               fullWidth
