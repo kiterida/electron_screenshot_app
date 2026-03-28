@@ -248,7 +248,11 @@ function getOrCreateMediaItem(filePath) {
     VALUES (?, ?, ?, ?)
   `).run(mediaName, '', normalizedFilePath, JSON.stringify([]));
 
-  return db.prepare('SELECT * FROM media_items WHERE id = ?').get(result.lastInsertRowid);
+  const createdMediaItem = db.prepare('SELECT * FROM media_items WHERE id = ?').get(result.lastInsertRowid);
+  const newList = ensureMediaList('New');
+  addMediaItemToList(newList.id, createdMediaItem.id);
+
+  return createdMediaItem;
 }
 
 function getMediaItemByFilePath(filePath) {
@@ -375,6 +379,31 @@ function updateMediaItemImageList(mediaItemId, imageList) {
   `).run(JSON.stringify(sanitized), mediaItemId);
 
   return db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaItemId);
+}
+
+function ensureMediaList(name) {
+  const trimmedName = (name || '').trim();
+  if (!trimmedName) {
+    throw new Error('List name is required.');
+  }
+
+  let mediaList = db.prepare(`
+    SELECT *
+    FROM media_lists
+    WHERE name = ?
+    LIMIT 1
+  `).get(trimmedName);
+
+  if (mediaList) {
+    return mediaList;
+  }
+
+  const result = db.prepare(`
+    INSERT INTO media_lists (name)
+    VALUES (?)
+  `).run(trimmedName);
+
+  return db.prepare('SELECT * FROM media_lists WHERE id = ?').get(result.lastInsertRowid);
 }
 
 function createMediaList(name) {

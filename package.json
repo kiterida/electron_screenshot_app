@@ -25,8 +25,9 @@
   "homepage": "./",
   "build": {
     "extends": null,
-    "appId": "com.yourdomain.yourapp",
-    "productName": "YourAppName",
+    "appId": "com.kadoosh.electronmediaapp",
+    "productName": "Electron Media App",
+    "artifactName": "${productName}-Setup-${version}.${ext}",
     "files": [
       "build/**/*",
       "main.js",
@@ -34,16 +35,25 @@
       "convertScreenshotsToJpeg.js"
     ],
     "directories": {
-      "buildResources": "assets"
+      "output": "dist",
+      "buildResources": "public"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "public/favicon.ico"
     },
     "mac": {
       "target": "dmg"
     },
     "linux": {
       "target": "AppImage"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Electron Media App"
     }
   },
   "scripts": {

@@ -8,11 +8,18 @@ In the project directory, you can run:
 
 ### `npm start`
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+# To create an executable for this project do this
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+### 'npm run build'
+
+Then
+
+### 'npm run dist'
+
+The 'npm run dist' command will take a long time to run and at the end you might get a bunch of errors
+These errors relate to part of that cache that includes macOS files with symbolic links like libcrypto.dylib and libssl.dylib, but don't worry about it.
+
+After the build finishes, look inside the dist/win-unpacked folder
 
 ### `npm test`
 

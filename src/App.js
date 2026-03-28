@@ -1,7 +1,34 @@
 // App.js
 
 import React, { useRef, useState, useEffect } from 'react';
-import { Tooltip } from '@mui/material';
+import {
+  Alert,
+  Box,
+  Button,
+  ButtonGroup,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  LinearProgress,
+  Paper,
+  Snackbar,
+  Stack,
+  TextField,
+  Tooltip,
+  Typography,
+} from '@mui/material';
+import AddPhotoAlternateOutlinedIcon from '@mui/icons-material/AddPhotoAlternateOutlined';
+import AutoAwesomeMotionOutlinedIcon from '@mui/icons-material/AutoAwesomeMotionOutlined';
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import CloseIcon from '@mui/icons-material/Close';
+import LibraryAddOutlinedIcon from '@mui/icons-material/LibraryAddOutlined';
+import TuneIcon from '@mui/icons-material/Tune';
+import VolumeOffOutlinedIcon from '@mui/icons-material/VolumeOffOutlined';
+import VolumeUpOutlinedIcon from '@mui/icons-material/VolumeUpOutlined';
 import SettingsDialog from './components/SettingsDialog';
 import SearchDialog from './components/SearchDialog';
 import MediaTableDialog from './components/MediaTableDialog';
@@ -19,6 +46,8 @@ function App() {
   const videoRef = useRef();
   const canvasRef = useRef(document.createElement('canvas'));
   const randomLoadSequenceRef = useRef(0);
+  const mediaLoadSequenceRef = useRef(0);
+  const autoGenerateCancelRequestedRef = useRef(false);
   const [videoPath, setVideoPath] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
   const [mediaItems, setMediaItems] = useState([]);
@@ -47,13 +76,27 @@ function App() {
   const [autoPlayOnScreenshotClick, setAutoPlayOnScreenshotClick] = useState(true);
   const [currentMediaItemId, setCurrentMediaItemId] = useState(null);
   const [isAutoGeneratingScreens, setIsAutoGeneratingScreens] = useState(false);
+  const [autoGenerateConfigOpen, setAutoGenerateConfigOpen] = useState(false);
+  const [autoGenerateIntervalInput, setAutoGenerateIntervalInput] = useState('10');
+  const [autoGenerateProgress, setAutoGenerateProgress] = useState({
+    current: 0,
+    total: 0,
+  });
   const [showVideoPlayer, setShowVideoPlayer] = useState(true);
   const [mediaLists, setMediaLists] = useState([]);
-  const [activeMediaListId, setActiveMediaListId] = useState('');
+  const [selectedMediaListId, setSelectedMediaListId] = useState('');
+  const [activeAddToListId, setActiveAddToListId] = useState('');
   const [mediaListsDialogOpen, setMediaListsDialogOpen] = useState(false);
   const [listActionMessage, setListActionMessage] = useState('');
+  const [snackbarState, setSnackbarState] = useState({
+    open: false,
+    message: '',
+    severity: 'info',
+  });
   const showRandomImages = appSettings.enable_random_images_on_startup !== 0;
-  const activeMediaList = mediaLists.find((list) => Number(list.id) === Number(activeMediaListId)) || null;
+  const autoGenerateIntervalSeconds = Math.max(1, parseInt(appSettings.auto_generate_interval_seconds, 10) || 10);
+  const selectedMediaList = mediaLists.find((list) => Number(list.id) === Number(selectedMediaListId)) || null;
+  const activeAddToList = mediaLists.find((list) => Number(list.id) === Number(activeAddToListId)) || null;
 
   const mapScreenshotRecord = (record) => ({
     id: record.id,
@@ -61,6 +104,28 @@ function App() {
     path: record.file_path,
     timestampSeconds: record.timestamp_seconds,
   });
+
+  const showSnackbar = (message, severity = 'info') => {
+    setSnackbarState({
+      open: true,
+      message,
+      severity,
+    });
+  };
+
+  const openAutoGenerateConfig = () => {
+    setAutoGenerateIntervalInput(String(autoGenerateIntervalSeconds));
+    setAutoGenerateConfigOpen(true);
+  };
+
+  const saveAutoGenerateConfig = () => {
+    const nextInterval = Math.max(1, parseInt(autoGenerateIntervalInput, 10) || 10);
+    window.electronAPI.updateAppSetting('auto_generate_interval_seconds', nextInterval);
+    setAppSettings((prev) => ({ ...prev, auto_generate_interval_seconds: nextInterval }));
+    setAutoGenerateIntervalInput(String(nextInterval));
+    setAutoGenerateConfigOpen(false);
+    showSnackbar(`Auto generate interval set to every ${nextInterval} seconds.`, 'success');
+  };
 
   const parseMediaImageList = (imageListValue) => {
     if (!imageListValue) {
@@ -165,25 +230,67 @@ function App() {
 
   const refreshStartupMediaItems = async (settingsOverride) => {
     const settings = settingsOverride || await window.electronAPI.getAppSettings();
+    const startupMediaList = settings.startup_media_list || 'all';
+    const startupSelectedListId =
+      typeof startupMediaList === 'string' && startupMediaList.startsWith('list:')
+        ? startupMediaList.split(':')[1] || ''
+        : '';
+
     setAppSettings(settings);
     setScreenshotsPerRow(settings.default_screens_per_row);
+    setSelectedMediaListId(startupSelectedListId);
+    setActiveAddToListId('');
     setMediaItemsLoading(true);
+    mediaLoadSequenceRef.current = Date.now();
+    setMediaItems([]);
 
     try {
       const items = await loadStartupMediaItems(settings);
-      const enrichedItems = await loadAndEnrichMediaItems(items, settings);
-      setMediaItems(enrichedItems);
+      await loadAndEnrichMediaItems(items, settings, { progressive: true, batchSize: 8 });
     } finally {
       setMediaItemsLoading(false);
     }
   };
 
-  const refreshMediaLists = async (preferredActiveListId) => {
+  const refreshSelectedMediaListItems = async (selectedListId, options = {}) => {
+    const settings = options.settingsOverride || await window.electronAPI.getAppSettings();
+    const showEntireLibrary = options.showEntireLibrary === true;
+    setAppSettings(settings);
+    setScreenshotsPerRow(settings.default_screens_per_row);
+    setMediaItemsLoading(true);
+    mediaLoadSequenceRef.current = Date.now();
+    setMediaItems([]);
+
+    try {
+      let items = [];
+
+      if (showEntireLibrary || !selectedListId) {
+        items = await window.electronAPI.getMediaItems();
+      } else {
+        items = await window.electronAPI.getMediaItemsForList(selectedListId);
+      }
+
+      await loadAndEnrichMediaItems(items, settings, { progressive: true, batchSize: 8 });
+    } finally {
+      setMediaItemsLoading(false);
+    }
+  };
+
+  const refreshMediaLists = async (preferredSelectedListId, preferredActiveAddToListId) => {
     const lists = await window.electronAPI.getMediaLists();
     setMediaLists(lists);
 
-    setActiveMediaListId((currentActiveListId) => {
-      const preferred = preferredActiveListId || currentActiveListId;
+    setSelectedMediaListId((currentSelectedListId) => {
+      const preferred = preferredSelectedListId || currentSelectedListId;
+      if (preferred && lists.some((list) => Number(list.id) === Number(preferred))) {
+        return preferred;
+      }
+
+      return '';
+    });
+
+    setActiveAddToListId((currentActiveId) => {
+      const preferred = preferredActiveAddToListId || currentActiveId;
       if (preferred && lists.some((list) => Number(list.id) === Number(preferred))) {
         return preferred;
       }
@@ -293,9 +400,14 @@ function App() {
   const handleSearchResults = async (searchResults) => {
     if (searchResults && searchResults.length > 0) {
       const settings = await window.electronAPI.getAppSettings();
-      const enrichedItems = await loadAndEnrichMediaItems(searchResults, settings);
-      setMediaItems(enrichedItems);
+      setMediaItemsLoading(true);
+      try {
+        await loadAndEnrichMediaItems(searchResults, settings, { progressive: true, batchSize: 8 });
+      } finally {
+        setMediaItemsLoading(false);
+      }
     } else {
+      mediaLoadSequenceRef.current = Date.now();
       setMediaItems([]); // or show "No results"
     }
   };
@@ -347,19 +459,49 @@ function App() {
     return () => window.removeEventListener('wheel', handleWheel);
   }, []);
 
-  const loadAndEnrichMediaItems = async (items, settings) => {
-    const enrichedItems = await Promise.all(
-      items.map(async (item) => {
-        const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(
-          item.id,
-          settings.screens_load_per_item
-        );
-        return {
-          ...item,
-          screenshots: screenshotRows.map(mapScreenshotRecord),
-        };
-      })
+  const enrichMediaItem = async (item, settings) => {
+    const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(
+      item.id,
+      settings.screens_load_per_item
     );
+
+    return {
+      ...item,
+      screenshots: screenshotRows.map(mapScreenshotRecord),
+    };
+  };
+
+  const loadAndEnrichMediaItems = async (items, settings, options = {}) => {
+    const { progressive = false, batchSize = 8 } = options;
+
+    if (!progressive) {
+      return Promise.all(items.map((item) => enrichMediaItem(item, settings)));
+    }
+
+    const loadSequence = Date.now();
+    mediaLoadSequenceRef.current = loadSequence;
+    setMediaItems([]);
+
+    const enrichedItems = [];
+
+    for (let index = 0; index < items.length; index += batchSize) {
+      if (mediaLoadSequenceRef.current !== loadSequence) {
+        return [];
+      }
+
+      const batch = items.slice(index, index + batchSize);
+      const enrichedBatch = await Promise.all(batch.map((item) => enrichMediaItem(item, settings)));
+
+      if (mediaLoadSequenceRef.current !== loadSequence) {
+        return [];
+      }
+
+      enrichedItems.push(...enrichedBatch);
+      setMediaItems((prev) => [...prev, ...enrichedBatch]);
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
     return enrichedItems;
   };
 
@@ -469,7 +611,7 @@ function App() {
         : nextIds.findIndex((value) => !value);
 
     if (targetIndex === -1) {
-      alert('All 8 slots are full. Click a slot first if you want to replace one.');
+      showSnackbar('All 8 slots are full. Click a slot first if you want to replace one.', 'warning');
       return true;
     }
 
@@ -546,25 +688,25 @@ function App() {
     if (!videoPath) return;
     const mediaItem = await window.electronAPI.getOrCreateMediaItem(videoPath);
     setCurrentMediaItemId(mediaItem?.id || null);
-    alert('Media item added to database!');
+    showSnackbar('Media item added to database!', 'success');
   };
 
   const addMediaItemToActiveList = async (mediaItemId, mediaName = 'media item') => {
-    if (!activeMediaListId) {
+    if (!activeAddToListId) {
       return false;
     }
 
     if (!mediaItemId) {
-      alert('This screenshot does not have a parent media item to add.');
+      showSnackbar('This screenshot does not have a parent media item to add.', 'warning');
       return true;
     }
 
     await window.electronAPI.addMediaItemToList({
-      listId: activeMediaListId,
+      listId: activeAddToListId,
       mediaItemId,
     });
-    await refreshMediaLists(activeMediaListId);
-    setListActionMessage(`Added ${mediaName} to "${activeMediaList?.name || 'Active List'}".`);
+    await refreshMediaLists(selectedMediaListId, activeAddToListId);
+    setListActionMessage(`Added ${mediaName} to "${activeAddToList?.name || 'Selected List'}".`);
     return true;
   };
 
@@ -632,6 +774,11 @@ function App() {
   }, [videoPath]);
 
   const handleOpen = () => {
+    if (isAutoGeneratingScreens) {
+      showSnackbar('Please wait for auto generate screenshots to finish before opening another video.', 'warning');
+      return;
+    }
+
     if (!showVideoPlayer) {
       setShowVideoPlayer(true);
       window.electronAPI.setVideoPlayerVisibility(true);
@@ -750,11 +897,16 @@ function App() {
     }
 
     if (!Number.isFinite(video.duration) || video.duration <= 0) {
-      alert('Please wait for the video metadata to finish loading before generating screenshots.');
+      showSnackbar('Please wait for the video metadata to finish loading before generating screenshots.', 'warning');
       return;
     }
 
     setIsAutoGeneratingScreens(true);
+    autoGenerateCancelRequestedRef.current = false;
+    setAutoGenerateProgress({
+      current: 0,
+      total: Math.max(1, Math.ceil(video.duration / autoGenerateIntervalSeconds)),
+    });
 
     const originalTime = video.currentTime;
     const wasPaused = video.paused;
@@ -773,8 +925,19 @@ function App() {
       canvasRef.current.width = video.videoWidth;
       canvasRef.current.height = video.videoHeight;
 
-      for (let seconds = 0; seconds < video.duration; seconds += 10) {
+      let completedCount = 0;
+
+      for (let seconds = 0; seconds < video.duration; seconds += autoGenerateIntervalSeconds) {
+        if (autoGenerateCancelRequestedRef.current) {
+          break;
+        }
+
         await seekVideoToTime(video, seconds);
+
+        if (autoGenerateCancelRequestedRef.current) {
+          break;
+        }
+
         ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
         const timestamp = formatTime(seconds);
@@ -790,6 +953,12 @@ function App() {
         });
 
         generatedScreenshots.push(mapScreenshotRecord(screenshotRow));
+        completedCount += 1;
+        const nextCompletedCount = completedCount;
+        setAutoGenerateProgress((prev) => ({
+          ...prev,
+          current: nextCompletedCount,
+        }));
       }
 
       setCurrentMediaItemId(mediaItem?.id || null);
@@ -801,10 +970,14 @@ function App() {
         return Array.from(merged.values()).sort((a, b) => a.timestampSeconds - b.timestampSeconds);
       });
 
-      alert(`Generated ${generatedScreenshots.length} screenshots in Auto_Generated_Screenshots.`);
+      if (autoGenerateCancelRequestedRef.current) {
+        showSnackbar(`Auto generate cancelled after ${generatedScreenshots.length} screenshot${generatedScreenshots.length === 1 ? '' : 's'}.`, 'info');
+      } else {
+        showSnackbar(`Generated ${generatedScreenshots.length} screenshots in Auto_Generated_Screenshots.`, 'success');
+      }
     } catch (error) {
       console.error('autoGenerateScreens failed:', error);
-      alert('Failed to auto generate screenshots.');
+      showSnackbar('Failed to auto generate screenshots.', 'error');
     } finally {
       try {
         await seekVideoToTime(video, originalTime);
@@ -817,6 +990,8 @@ function App() {
       }
 
       setIsAutoGeneratingScreens(false);
+      setAutoGenerateProgress({ current: 0, total: 0 });
+      autoGenerateCancelRequestedRef.current = false;
     }
   };
 
@@ -911,14 +1086,23 @@ function App() {
       >
         <strong>Media Lists</strong>
         <select
-          value={activeMediaListId}
-          onChange={(e) => {
-            setActiveMediaListId(e.target.value);
+          value={selectedMediaListId}
+          onChange={async (e) => {
+            const nextListId = e.target.value;
+            setSelectedMediaListId(nextListId);
             setListActionMessage('');
+
+            if (activeAddToListId && activeAddToListId !== nextListId) {
+              setActiveAddToListId('');
+            }
+
+            await refreshSelectedMediaListItems(nextListId, {
+              showEntireLibrary: activeAddToListId === nextListId && Boolean(nextListId),
+            });
           }}
           style={{ minWidth: 220, padding: '8px 10px' }}
         >
-          <option value="">No active list</option>
+          <option value="">All Library Items</option>
           {mediaLists.map((list) => (
             <option key={list.id} value={list.id}>
               {list.name} ({list.item_count || 0})
@@ -926,20 +1110,27 @@ function App() {
           ))}
         </select>
         <button onClick={() => setMediaListsDialogOpen(true)}>Manage Lists</button>
-        {activeMediaListId && (
+        {selectedMediaListId && (
           <button
-            onClick={() => {
-              setActiveMediaListId('');
+            onClick={async () => {
+              const nextActiveState = activeAddToListId === selectedMediaListId ? '' : selectedMediaListId;
+              setActiveAddToListId(nextActiveState);
               setListActionMessage('');
+
+              await refreshSelectedMediaListItems(selectedMediaListId, {
+                showEntireLibrary: Boolean(nextActiveState),
+              });
             }}
           >
-            Stop Editing List
+            {activeAddToListId === selectedMediaListId ? 'Stop Adding to List' : 'Add to List'}
           </button>
         )}
         <span style={{ color: '#475569', fontSize: 13 }}>
-          {activeMediaList
-            ? `Edit mode is active for "${activeMediaList.name}". Click any screenshot to add its parent media item to this list.`
-            : 'Select a list to make screenshot clicks add parent media items to it.'}
+          {activeAddToList
+            ? `Add mode is active for "${activeAddToList.name}". The full library is shown so screenshot clicks can add parent media items to this list.`
+            : selectedMediaList
+              ? `Viewing "${selectedMediaList.name}". Click "Add to List" if you want screenshot clicks to add items into this list.`
+              : 'Select a list to display only that list, or leave it on All Library Items.'}
         </span>
         {listActionMessage && (
           <span style={{ color: '#166534', fontSize: 13 }}>{listActionMessage}</span>
@@ -982,14 +1173,24 @@ function App() {
                 {videoPath}
               </div>
             </div>
-            <button
-              onClick={() => {
-                setShowVideoPlayer(false);
-                window.electronAPI.setVideoPlayerVisibility(false);
-              }}
-            >
-              Hide Video
-            </button>
+            <Tooltip title="Hide Video Player">
+              <IconButton
+                onClick={() => {
+                  setShowVideoPlayer(false);
+                  window.electronAPI.setVideoPlayerVisibility(false);
+                }}
+                sx={{
+                  color: '#334155',
+                  backgroundColor: 'rgba(255,255,255,0.78)',
+                  border: '1px solid rgba(148, 163, 184, 0.3)',
+                  '&:hover': {
+                    backgroundColor: '#fff',
+                  },
+                }}
+              >
+                <CloseIcon />
+              </IconButton>
+            </Tooltip>
           </div>
 
           <div style={{ padding: 16 }}>
@@ -1015,30 +1216,80 @@ function App() {
               />
             </div>
 
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 10,
-                marginTop: 14,
-              }}
+            <Stack
+              direction="row"
+              spacing={1.25}
+              useFlexGap
+              flexWrap="wrap"
+              sx={{ mt: 1.75, alignItems: 'center' }}
             >
-              <button onClick={takeScreenshot}>Take Screenshot</button>
-              <button onClick={autoGenerateScreens} disabled={isAutoGeneratingScreens || !videoPath}>
-                {isAutoGeneratingScreens ? 'Generating Screens...' : 'Auto Generate Screens'}
-              </button>
-              <button onClick={addToDatabase} disabled={Boolean(currentMediaItemId)}>
+              <Button
+                variant="contained"
+                color="primary"
+                startIcon={<AddPhotoAlternateOutlinedIcon />}
+                onClick={takeScreenshot}
+              >
+                Take Screenshot
+              </Button>
+              <ButtonGroup variant="contained" color="secondary" disabled={!videoPath}>
+                <Button
+                  startIcon={<AutoAwesomeMotionOutlinedIcon />}
+                  onClick={autoGenerateScreens}
+                  disabled={isAutoGeneratingScreens || !videoPath}
+                >
+                  {isAutoGeneratingScreens ? 'Generating Screens...' : 'Auto Generate Screens'}
+                </Button>
+                <Tooltip title={`Configure interval (${autoGenerateIntervalSeconds}s)`}>
+                  <span>
+                    <Button
+                      onClick={openAutoGenerateConfig}
+                      disabled={isAutoGeneratingScreens || !videoPath}
+                      sx={{ minWidth: 44, px: 1.25 }}
+                    >
+                      <TuneIcon fontSize="small" />
+                    </Button>
+                  </span>
+                </Tooltip>
+              </ButtonGroup>
+              <Button
+                variant={currentMediaItemId ? 'outlined' : 'contained'}
+                color={currentMediaItemId ? 'success' : 'inherit'}
+                startIcon={<LibraryAddOutlinedIcon />}
+                onClick={addToDatabase}
+                disabled={Boolean(currentMediaItemId)}
+              >
                 {currentMediaItemId ? 'Already in Database' : 'Add to Database'}
-              </button>
-              <button onClick={() => setAutoPlayOnScreenshotClick(!autoPlayOnScreenshotClick)}>
-                {autoPlayOnScreenshotClick ? 'Turn Autoplay off' : 'Turn Autoplay On'}
-              </button>
-              <button onClick={stepBack}>&lt;</button>
-              <button onClick={stepForward}>&gt;</button>
-              <button onClick={goBackTenSeconds}>&lt; 10s</button>
-              <button onClick={goForwardTenSeconds}>10s &gt;</button>
-              <button onClick={toggleMute}>{isMuted ? 'Unmute' : 'Mute'}</button>
-            </div>
+              </Button>
+              <Chip
+                color={autoPlayOnScreenshotClick ? 'success' : 'default'}
+                label={autoPlayOnScreenshotClick ? 'Autoplay On' : 'Autoplay Off'}
+                onClick={() => setAutoPlayOnScreenshotClick(!autoPlayOnScreenshotClick)}
+                clickable
+                variant={autoPlayOnScreenshotClick ? 'filled' : 'outlined'}
+              />
+              <ButtonGroup variant="outlined" color="inherit">
+                <Button onClick={goBackTenSeconds} startIcon={<ChevronLeftIcon />}>
+                  10s
+                </Button>
+                <Button onClick={stepBack}>
+                  <ChevronLeftIcon fontSize="small" />
+                </Button>
+                <Button onClick={stepForward}>
+                  <ChevronRightIcon fontSize="small" />
+                </Button>
+                <Button onClick={goForwardTenSeconds} endIcon={<ChevronRightIcon />}>
+                  10s
+                </Button>
+              </ButtonGroup>
+              <Button
+                variant="outlined"
+                color={isMuted ? 'warning' : 'success'}
+                startIcon={isMuted ? <VolumeOffOutlinedIcon /> : <VolumeUpOutlinedIcon />}
+                onClick={toggleMute}
+              >
+                {isMuted ? 'Unmute' : 'Mute'}
+              </Button>
+            </Stack>
 
             <div style={{ marginTop: 18 }}>
               <div
@@ -1099,12 +1350,13 @@ function App() {
         open={mediaListsDialogOpen}
         onClose={() => setMediaListsDialogOpen(false)}
         lists={mediaLists}
-        activeListId={activeMediaListId}
+        activeListId={activeAddToListId}
         onSetActiveList={(listId) => {
-          setActiveMediaListId(listId);
+          setActiveAddToListId(listId);
           setListActionMessage('');
         }}
         onListsChanged={refreshMediaLists}
+        showSnackbar={showSnackbar}
       />
       {topMediaItemScreenshots.length > 0 && (
         <div style={{ border: '6px solid #ccc', margin: 0, padding: 0, position: 'relative' }}>
@@ -1284,10 +1536,10 @@ function App() {
       )}
       {mediaItemsLoading && (
         <div style={{ padding: '8px 4px', color: '#475569', fontSize: 14 }}>
-          Random screenshots loaded. Media items are now being loaded...
+          Media items are loading...
         </div>
       )}
-      <SettingsDialog open={settingsOpen} onClose={handleSettingsChanged} />
+      <SettingsDialog open={settingsOpen} onClose={handleSettingsChanged} showSnackbar={showSnackbar} />
       <SearchDialog
         open={showSearch}
         onClose={() => setShowSearch(false)}
@@ -1380,6 +1632,7 @@ function App() {
       <Tooltip title="Open Video">
         <button
           onClick={handleOpen}
+          disabled={isAutoGeneratingScreens}
           style={{
             position: 'fixed',
             left: 16,
@@ -1388,19 +1641,112 @@ function App() {
             height: 56,
             borderRadius: '50%',
             border: 'none',
-            background: '#1976d2',
+            background: isAutoGeneratingScreens ? '#94a3b8' : '#1976d2',
             color: '#fff',
             fontSize: 32,
             lineHeight: 1,
-            cursor: 'pointer',
+            cursor: isAutoGeneratingScreens ? 'not-allowed' : 'pointer',
             boxShadow: '0 4px 12px rgba(0, 0, 0, 0.25)',
             zIndex: 1000,
+            opacity: isAutoGeneratingScreens ? 0.7 : 1,
           }}
           aria-label="Open Video"
         >
           +
         </button>
       </Tooltip>
+      {isAutoGeneratingScreens && autoGenerateProgress.total > 0 && (
+        <Paper
+          elevation={10}
+          sx={{
+            position: 'fixed',
+            right: 20,
+            bottom: 88,
+            width: { xs: 'calc(100vw - 32px)', sm: 320 },
+            maxWidth: 360,
+            p: 1.5,
+            borderRadius: 2,
+            zIndex: 1400,
+          }}
+        >
+          <Stack spacing={1}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                Auto Generating Screenshots
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {Math.round((autoGenerateProgress.current / autoGenerateProgress.total) * 100)}%
+              </Typography>
+            </Box>
+            <LinearProgress
+              variant="determinate"
+              value={(autoGenerateProgress.current / autoGenerateProgress.total) * 100}
+              sx={{ height: 8, borderRadius: 999 }}
+            />
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1 }}>
+              <Typography variant="caption" color="text.secondary">
+                {autoGenerateProgress.current} of {autoGenerateProgress.total} screenshots saved
+              </Typography>
+              <Button
+                size="small"
+                color="error"
+                variant="outlined"
+                onClick={() => {
+                  autoGenerateCancelRequestedRef.current = true;
+                }}
+                sx={{
+                  minWidth: 56,
+                  px: 1,
+                  py: 0.25,
+                  fontSize: '0.7rem',
+                  lineHeight: 1.2,
+                }}
+              >
+                Cancel
+              </Button>
+            </Box>
+          </Stack>
+        </Paper>
+      )}
+      <Snackbar
+        open={snackbarState.open}
+        autoHideDuration={4000}
+        onClose={() => setSnackbarState((prev) => ({ ...prev, open: false }))}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert
+          onClose={() => setSnackbarState((prev) => ({ ...prev, open: false }))}
+          severity={snackbarState.severity}
+          variant="filled"
+          sx={{ width: '100%' }}
+        >
+          {snackbarState.message}
+        </Alert>
+      </Snackbar>
+      <Dialog open={autoGenerateConfigOpen} onClose={() => setAutoGenerateConfigOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Auto Generate Screenshots</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              Choose how many seconds apart each auto-generated screenshot should be taken.
+            </Typography>
+            <TextField
+              label="Seconds Between Screenshots"
+              type="number"
+              value={autoGenerateIntervalInput}
+              onChange={(e) => setAutoGenerateIntervalInput(e.target.value)}
+              inputProps={{ min: 1, step: 1 }}
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setAutoGenerateConfigOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={saveAutoGenerateConfig}>
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
 
 
 

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Box, Button, Checkbox, Dialog, DialogTitle, DialogContent, FormControlLabel, MenuItem, Stack, TextField, Typography } from '@mui/material';
+import { Box, Button, Checkbox, Dialog, DialogTitle, DialogContent, FormControlLabel, IconButton, MenuItem, Stack, TextField, Typography } from '@mui/material';
+import CloseIcon from '@mui/icons-material/Close';
 import IgnoredScreenshotsDialog from './IgnoredScreenshotsDialog';
 
-export default function SettingsDialog({ open, onClose }) {
+export default function SettingsDialog({ open, onClose, showSnackbar }) {
   const [settings, setSettings] = useState({
     default_screens_per_row: 3,
     screens_load_per_item: 12,
@@ -83,19 +84,29 @@ export default function SettingsDialog({ open, onClose }) {
     setMigrationResult(result);
 
     if (!result.ok) {
-      alert(result.message || 'Screenshot migration could not be started.');
+      showSnackbar?.(result.message || 'Screenshot migration could not be started.', 'error');
       return;
     }
 
-    alert(
-      `Screenshot migration complete.\n\nFolder: ${result.folder}\nScanned: ${result.scanned}\nMatched to media items: ${result.matched}\nInserted into database: ${result.inserted}\nUnmatched: ${result.unmatched.length}`
+    showSnackbar?.(
+      `Migration complete. Scanned ${result.scanned}, matched ${result.matched}, inserted ${result.inserted}, unmatched ${result.unmatched.length}.`,
+      'success'
     );
   };
 
   return (
     <>
       <Dialog open={open} onClose={onClose}>
-        <DialogTitle>App Settings</DialogTitle>
+        <DialogTitle>
+          App Settings
+          <IconButton
+            aria-label="close"
+            onClick={onClose}
+            sx={{ position: 'absolute', right: 8, top: 8 }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ minWidth: 420, pt: 1 }}>
             <TextField

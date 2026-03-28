@@ -22,6 +22,7 @@ export default function MediaListsDialog({
   activeListId,
   onSetActiveList,
   onListsChanged,
+  showSnackbar,
 }) {
   const [newListName, setNewListName] = useState('');
   const [selectedListId, setSelectedListId] = useState(activeListId || '');
@@ -110,7 +111,7 @@ export default function MediaListsDialog({
       await onListsChanged(created.id);
     } catch (error) {
       console.error('handleCreateList failed:', error);
-      alert(error?.message || 'Failed to create list.');
+      showSnackbar?.(error?.message || 'Failed to create list.', 'error');
     }
   };
 
@@ -184,7 +185,7 @@ export default function MediaListsDialog({
               onClick={() => onSetActiveList(selectedListId || '')}
               disabled={!selectedListId}
             >
-              {selectedListId && Number(selectedListId) === Number(activeListId) ? 'Active List' : 'Set Active'}
+              {selectedListId && Number(selectedListId) === Number(activeListId) ? 'Add Mode Target' : 'Set Add Target'}
             </Button>
             <Button
               variant="outlined"
@@ -213,7 +214,7 @@ export default function MediaListsDialog({
             </Box>
           ) : (
             <Typography variant="body2" color="text.secondary">
-              Select a list to inspect its media items. Set an active list to add parent media items by clicking screenshots in the app.
+              Select a list to inspect its media items. Set an add target if you want screenshot clicks in the app to add parent media items to that list.
             </Typography>
           )}
         </Stack>
