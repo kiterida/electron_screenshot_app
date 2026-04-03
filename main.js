@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require('electron')
 const { execFile } = require('child_process');
 
 const isDev = !app.isPackaged;
+const ffmpegExecutable = 'C:\\ffmpeg\\bin\\ffmpeg.exe';
 
 function getDbPath() {
   if (isDev) {
@@ -98,6 +99,24 @@ function ensureDatabaseSchema(database) {
   database.prepare(`
     CREATE INDEX IF NOT EXISTS idx_screenshots_random_pool
     ON screenshots (is_ignored, has_been_displayed)
+  `).run();
+
+  database.prepare(`
+    CREATE TABLE IF NOT EXISTS exported_videos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      media_item_id INTEGER NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL UNIQUE,
+      start_seconds REAL,
+      end_seconds REAL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (media_item_id) REFERENCES media_items(id) ON DELETE CASCADE
+    )
+  `).run();
+
+  database.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_exported_videos_media_item_id
+    ON exported_videos (media_item_id)
   `).run();
 
   database.prepare(`
@@ -949,6 +968,48 @@ function setSetting(key, value) {
   `).run(key, value);
 }
 
+function resolveScreenshotFolder(videoPath) {
+  let folder = getSetting('screenshot_folder');
+  if (!folder && videoPath) {
+    const fallback = path.join(path.dirname(videoPath), 'screenshots');
+    fs.mkdirSync(fallback, { recursive: true });
+    folder = fallback;
+  }
+
+  return folder;
+}
+
+function insertExportedVideo(mediaItemId, filePath, startSeconds, endSeconds) {
+  const normalizedPath = normalizeFilePath(filePath);
+  const fileName = path.basename(normalizedPath);
+
+  db.prepare(`
+    INSERT OR IGNORE INTO exported_videos (
+      media_item_id,
+      file_name,
+      file_path,
+      start_seconds,
+      end_seconds
+    )
+    VALUES (?, ?, ?, ?, ?)
+  `).run(mediaItemId, fileName, normalizedPath, startSeconds, endSeconds);
+
+  return db.prepare(`
+    SELECT *
+    FROM exported_videos
+    WHERE file_path = ?
+  `).get(normalizedPath);
+}
+
+function getExportedVideosForMediaItem(mediaItemId) {
+  return db.prepare(`
+    SELECT *
+    FROM exported_videos
+    WHERE media_item_id = ?
+    ORDER BY start_seconds ASC, end_seconds ASC, id ASC
+  `).all(mediaItemId);
+}
+
 ipcMain.handle('select-screenshot-folder', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   if (!result.canceled && result.filePaths[0]) {
@@ -959,14 +1020,7 @@ ipcMain.handle('select-screenshot-folder', async () => {
 });
 
 ipcMain.handle('get-screenshot-folder', async (event, videoPath) => {
-  let folder = getSetting('screenshot_folder');
-  if (!folder && videoPath) {
-    const fallback = path.join(path.dirname(videoPath), 'screenshots');
-    fs.mkdirSync(fallback, { recursive: true });
-    folder = fallback;
-  }
-  
-  return folder;
+  return resolveScreenshotFolder(videoPath);
 });
 
 ipcMain.on('open-video-dialog', async (event) => {
@@ -1035,6 +1089,15 @@ ipcMain.handle('get-screenshots-for-media-item', async (event, mediaItemId, limi
     return getScreenshotsForMediaItem(mediaItemId, limit);
   } catch (error) {
     console.error('Failed to load screenshots for media item:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('get-exported-videos-for-media-item', async (event, mediaItemId) => {
+  try {
+    return getExportedVideosForMediaItem(mediaItemId);
+  } catch (error) {
+    console.error('Failed to load exported videos for media item:', error);
     throw error;
   }
 });
@@ -1350,6 +1413,8 @@ ipcMain.on('show-context-menu', (event, payload = {}) => {
   const screenshotPath = payload.screenshotPath || null;
   let mediaItemId = payload.mediaItemId || null;
   let filePath = payload.filePath || null;
+  const currentListId = payload.currentListId || null;
+  const currentListName = payload.currentListName || null;
 
   if (screenshotId && (!mediaItemId || !filePath)) {
     const mediaItem = getMediaItemForScreenshot(screenshotId);
@@ -1358,6 +1423,40 @@ ipcMain.on('show-context-menu', (event, payload = {}) => {
       filePath = mediaItem.file_name;
     }
   }
+
+  const allLists = getMediaLists();
+  const eligibleTargetLists = allLists.filter((list) => Number(list.id) !== Number(currentListId));
+  const buildListActionSubmenu = (command) => {
+    if (!mediaItemId) {
+      return [{ label: 'No media item available', enabled: false }];
+    }
+
+    const targetLists = command === 'move-media-item-to-list'
+      ? (currentListId ? eligibleTargetLists : [])
+      : allLists;
+
+    if (command === 'move-media-item-to-list' && !currentListId) {
+      return [{ label: 'Select a list view first', enabled: false }];
+    }
+
+    if (targetLists.length === 0) {
+      return [{ label: 'No other lists available', enabled: false }];
+    }
+
+    return targetLists.map((list) => ({
+      label: `${list.name} (${list.item_count || 0})`,
+      click: () => {
+        event.sender.send('context-menu-command', {
+          command,
+          mediaItemId,
+          targetListId: list.id,
+          targetListName: list.name,
+          currentListId,
+          currentListName,
+        });
+      },
+    }));
+  };
 
   const template = [
      {
@@ -1408,6 +1507,14 @@ ipcMain.on('show-context-menu', (event, payload = {}) => {
           mediaItemId,
         });
       }
+    },
+    {
+      label: 'Move to List',
+      submenu: buildListActionSubmenu('move-media-item-to-list'),
+    },
+    {
+      label: 'Add to List',
+      submenu: buildListActionSubmenu('add-media-item-to-list'),
     },
     { type: 'separator' },
     {
@@ -1608,6 +1715,82 @@ function openSettingsWindow() {
   }
 }
 
+async function exportVideoRange({ inputPath, mediaItemId, startSeconds, endSeconds }) {
+  if (!inputPath || !fs.existsSync(inputPath)) {
+    throw new Error('The source video could not be found.');
+  }
+
+  const resolvedStart = Number(startSeconds);
+  const resolvedEnd = Number(endSeconds);
+
+  if (!Number.isFinite(resolvedStart) || !Number.isFinite(resolvedEnd) || resolvedEnd <= resolvedStart) {
+    throw new Error('A valid In/Out range is required before exporting.');
+  }
+
+  const formatRangeForFilename = (seconds) => {
+    const totalSeconds = Math.max(0, Math.floor(seconds));
+    const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+    const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+    const secs = String(totalSeconds % 60).padStart(2, '0');
+    return `${hours}-${minutes}-${secs}`;
+  };
+
+  const parsedPath = path.parse(inputPath);
+  const rangeLabel = `${formatRangeForFilename(resolvedStart)}_to_${formatRangeForFilename(resolvedEnd)}`;
+  const screenshotFolder = resolveScreenshotFolder(inputPath);
+  if (!screenshotFolder) {
+    throw new Error('A screenshot folder is required before exporting video ranges.');
+  }
+
+  const exportFolder = path.join(screenshotFolder, 'video_exports');
+  fs.mkdirSync(exportFolder, { recursive: true });
+
+  const fileExtension = parsedPath.ext || '.mp4';
+  let outputPath = path.join(exportFolder, `${parsedPath.name}_${rangeLabel}${fileExtension}`);
+  let duplicateIndex = 2;
+
+  while (fs.existsSync(outputPath)) {
+    outputPath = path.join(exportFolder, `${parsedPath.name}_${rangeLabel}_${duplicateIndex}${fileExtension}`);
+    duplicateIndex += 1;
+  }
+
+  await new Promise((resolve, reject) => {
+    execFile(
+      ffmpegExecutable,
+      [
+        '-y',
+        '-ss',
+        resolvedStart.toString(),
+        '-to',
+        resolvedEnd.toString(),
+        '-i',
+        inputPath,
+        '-c:v',
+        'libx264',
+        '-c:a',
+        'aac',
+        outputPath,
+      ],
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(stderr || stdout || error.message));
+          return;
+        }
+
+        resolve();
+      }
+    );
+  });
+
+  const exportedVideo = insertExportedVideo(mediaItemId, outputPath, resolvedStart, resolvedEnd);
+
+  return {
+    canceled: false,
+    outputPath,
+    exportedVideo,
+  };
+}
+
 ipcMain.on('open-settings-window', () => {
   openSettingsWindow();
 });
@@ -1620,6 +1803,15 @@ ipcMain.on('set-video-player-visibility', (event, isVisible) => {
     mainWindow.webContents.send('video-player-visibility-changed', isVideoPlayerVisible);
   } else {
     event.sender.send('video-player-visibility-changed', isVideoPlayerVisible);
+  }
+});
+
+ipcMain.handle('export-video-range', async (event, payload) => {
+  try {
+    return await exportVideoRange(payload);
+  } catch (error) {
+    console.error('Failed to export video range:', error);
+    throw error;
   }
 });
 

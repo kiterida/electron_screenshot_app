@@ -16,6 +16,8 @@ import {
   Paper,
   Snackbar,
   Stack,
+  Tab,
+  Tabs,
   TextField,
   Tooltip,
   Typography,
@@ -25,7 +27,13 @@ import AutoAwesomeMotionOutlinedIcon from '@mui/icons-material/AutoAwesomeMotion
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
+import FirstPageIcon from '@mui/icons-material/FirstPage';
+import InputIcon from '@mui/icons-material/Input';
+import LastPageIcon from '@mui/icons-material/LastPage';
 import LibraryAddOutlinedIcon from '@mui/icons-material/LibraryAddOutlined';
+import OutputIcon from '@mui/icons-material/Output';
+import SaveAltIcon from '@mui/icons-material/SaveAlt';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import TuneIcon from '@mui/icons-material/Tune';
 import VolumeOffOutlinedIcon from '@mui/icons-material/VolumeOffOutlined';
 import VolumeUpOutlinedIcon from '@mui/icons-material/VolumeUpOutlined';
@@ -42,14 +50,34 @@ function formatTime(seconds) {
   return `${pad(h)}-${pad(m)}-${pad(s)}`;
 }
 
+function sortExportedVideosByRange(videos) {
+  return [...videos].sort((a, b) => {
+    const startDiff = (a.start_seconds ?? 0) - (b.start_seconds ?? 0);
+    if (startDiff !== 0) {
+      return startDiff;
+    }
+
+    const endDiff = (a.end_seconds ?? 0) - (b.end_seconds ?? 0);
+    if (endDiff !== 0) {
+      return endDiff;
+    }
+
+    return (a.id ?? 0) - (b.id ?? 0);
+  });
+}
+
 function App() {
   const videoRef = useRef();
   const canvasRef = useRef(document.createElement('canvas'));
   const randomLoadSequenceRef = useRef(0);
   const mediaLoadSequenceRef = useRef(0);
   const autoGenerateCancelRequestedRef = useRef(false);
+  const pendingSeekTimeRef = useRef(null);
+  const selectedMediaListIdRef = useRef('');
+  const activeAddToListIdRef = useRef('');
   const [videoPath, setVideoPath] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
+  const [exportedVideos, setExportedVideos] = useState([]);
   const [mediaItems, setMediaItems] = useState([]);
   const [hoveredScreenshot, setHoveredScreenshot] = useState(null);
   const [showItemName, setShowItemName] = useState(false);
@@ -82,7 +110,11 @@ function App() {
     current: 0,
     total: 0,
   });
+  const [autoGenerateInPoint, setAutoGenerateInPoint] = useState(null);
+  const [autoGenerateOutPoint, setAutoGenerateOutPoint] = useState(null);
+  const [currentVideoTime, setCurrentVideoTime] = useState(0);
   const [showVideoPlayer, setShowVideoPlayer] = useState(true);
+  const [mediaDetailTab, setMediaDetailTab] = useState('screenshots');
   const [mediaLists, setMediaLists] = useState([]);
   const [selectedMediaListId, setSelectedMediaListId] = useState('');
   const [activeAddToListId, setActiveAddToListId] = useState('');
@@ -97,6 +129,14 @@ function App() {
   const autoGenerateIntervalSeconds = Math.max(1, parseInt(appSettings.auto_generate_interval_seconds, 10) || 10);
   const selectedMediaList = mediaLists.find((list) => Number(list.id) === Number(selectedMediaListId)) || null;
   const activeAddToList = mediaLists.find((list) => Number(list.id) === Number(activeAddToListId)) || null;
+
+  useEffect(() => {
+    selectedMediaListIdRef.current = selectedMediaListId;
+  }, [selectedMediaListId]);
+
+  useEffect(() => {
+    activeAddToListIdRef.current = activeAddToListId;
+  }, [activeAddToListId]);
 
   const mapScreenshotRecord = (record) => ({
     id: record.id,
@@ -736,12 +776,17 @@ function App() {
   }, [videoPath]);
 
   useEffect(() => {
+    clearInOutPoints();
+  }, [videoPath]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const syncLoadedVideoState = async () => {
       if (!videoPath) {
         setCurrentMediaItemId(null);
         setScreenshots([]);
+        setExportedVideos([]);
         return;
       }
 
@@ -755,14 +800,17 @@ function App() {
 
       if (mediaItem?.id) {
         const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(mediaItem.id, 100);
+        const exportedVideoRows = await window.electronAPI.getExportedVideosForMediaItem(mediaItem.id);
 
         if (cancelled) {
           return;
         }
 
         setScreenshots(screenshotRows.map(mapScreenshotRecord));
+        setExportedVideos(sortExportedVideosByRange(exportedVideoRows));
       } else {
         setScreenshots([]);
+        setExportedVideos([]);
       }
     };
 
@@ -787,6 +835,18 @@ function App() {
   };
 
   const currentVideoName = videoPath ? videoPath.split(/[\\/]/).pop() : '';
+
+  const formatPlaybackTime = (seconds) => {
+    if (!Number.isFinite(seconds)) {
+      return '--:--:--';
+    }
+
+    const totalSeconds = Math.max(0, Math.floor(seconds));
+    const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+    const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+    const secs = String(totalSeconds % 60).padStart(2, '0');
+    return `${hours}:${minutes}:${secs}`;
+  };
 
   const stepBack = () => {
     const video = videoRef.current;
@@ -826,6 +886,101 @@ function App() {
     if (video) {
       video.muted = !video.muted;
       setIsMuted(video.muted);
+    }
+  };
+
+  const setCurrentInPoint = () => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.currentTime)) {
+      return;
+    }
+
+    const nextInPoint = Math.max(0, video.currentTime);
+    if (autoGenerateOutPoint != null && nextInPoint >= autoGenerateOutPoint) {
+      showSnackbar('The In point must be before the Out point.', 'warning');
+      return;
+    }
+
+    setAutoGenerateInPoint(nextInPoint);
+  };
+
+  const setCurrentOutPoint = () => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.currentTime)) {
+      return;
+    }
+
+    const nextOutPoint = Math.max(0, video.currentTime);
+    if (autoGenerateInPoint != null && nextOutPoint <= autoGenerateInPoint) {
+      showSnackbar('The Out point must be after the In point.', 'warning');
+      return;
+    }
+
+    setAutoGenerateOutPoint(nextOutPoint);
+  };
+
+  const clearInOutPoints = () => {
+    setAutoGenerateInPoint(null);
+    setAutoGenerateOutPoint(null);
+  };
+
+  const jumpToInPoint = () => {
+    if (autoGenerateInPoint == null || !videoRef.current) {
+      return;
+    }
+
+    videoRef.current.currentTime = autoGenerateInPoint;
+  };
+
+  const jumpToOutPoint = () => {
+    if (autoGenerateOutPoint == null || !videoRef.current) {
+      return;
+    }
+
+    videoRef.current.currentTime = autoGenerateOutPoint;
+  };
+
+  const exportSelectedRange = async () => {
+    if (!videoPath) {
+      return;
+    }
+
+    if (autoGenerateInPoint == null || autoGenerateOutPoint == null || autoGenerateOutPoint <= autoGenerateInPoint) {
+      showSnackbar('Please set a valid In and Out point before exporting.', 'warning');
+      return;
+    }
+
+    try {
+      const mediaItem = currentMediaItemId
+        ? { id: currentMediaItemId }
+        : await window.electronAPI.getOrCreateMediaItem(videoPath);
+
+      setCurrentMediaItemId(mediaItem?.id || null);
+      const result = await window.electronAPI.exportVideoRange({
+        inputPath: videoPath,
+        mediaItemId: mediaItem.id,
+        startSeconds: autoGenerateInPoint,
+        endSeconds: autoGenerateOutPoint,
+      });
+
+      if (result?.canceled) {
+        return;
+      }
+
+      if (result?.exportedVideo) {
+        setExportedVideos((prev) =>
+          sortExportedVideosByRange([
+            result.exportedVideo,
+            ...prev.filter((item) => item.id !== result.exportedVideo.id),
+          ])
+        );
+        setMediaDetailTab('exports');
+      }
+
+      showSnackbar(`Exported selected range to ${result.outputPath}`, 'success');
+    } catch (error) {
+      console.error('exportSelectedRange failed:', error);
+      showSnackbar('Failed to export the selected video range.', 'error');
     }
   };
 
@@ -901,11 +1056,19 @@ function App() {
       return;
     }
 
+    const generationStart = autoGenerateInPoint != null ? autoGenerateInPoint : 0;
+    const generationEnd = autoGenerateOutPoint != null ? Math.min(autoGenerateOutPoint, video.duration) : video.duration;
+
+    if (generationEnd <= generationStart) {
+      showSnackbar('Please set a valid In/Out range before auto generating screenshots.', 'warning');
+      return;
+    }
+
     setIsAutoGeneratingScreens(true);
     autoGenerateCancelRequestedRef.current = false;
     setAutoGenerateProgress({
       current: 0,
-      total: Math.max(1, Math.ceil(video.duration / autoGenerateIntervalSeconds)),
+      total: Math.max(1, Math.floor((generationEnd - generationStart) / autoGenerateIntervalSeconds) + 1),
     });
 
     const originalTime = video.currentTime;
@@ -927,7 +1090,7 @@ function App() {
 
       let completedCount = 0;
 
-      for (let seconds = 0; seconds < video.duration; seconds += autoGenerateIntervalSeconds) {
+      for (let seconds = generationStart; seconds < generationEnd; seconds += autoGenerateIntervalSeconds) {
         if (autoGenerateCancelRequestedRef.current) {
           break;
         }
@@ -999,9 +1162,33 @@ function App() {
     const seconds = Number.isFinite(shot.timestampSeconds)
       ? shot.timestampSeconds
       : 0;
+    if (!showVideoPlayer || !videoRef.current) {
+      requestVideoPlayerSeek(seconds);
+      return;
+    }
     videoRef.current.currentTime = seconds;
-    if (autoPlayOnScreenshotClick)
-      videoRef.current.play();
+    if (autoPlayOnScreenshotClick) {
+      videoRef.current.play().catch(() => {});
+    }
+  };
+
+  const requestVideoPlayerSeek = (seconds) => {
+    pendingSeekTimeRef.current = Number.isFinite(seconds) ? seconds : 0;
+    if (!showVideoPlayer) {
+      setShowVideoPlayer(true);
+      window.electronAPI.setVideoPlayerVisibility(true);
+    }
+  };
+
+  const openItemContextMenu = ({ screenshotId, screenshotPath, mediaItemId, filePath }) => {
+    window.electronAPI.showContextMenu({
+      screenshotId,
+      screenshotPath,
+      mediaItemId,
+      filePath,
+      currentListId: selectedMediaListId,
+      currentListName: selectedMediaList?.name || '',
+    });
   };
 
   const getTimeFromFilename = (filename) => {
@@ -1052,6 +1239,42 @@ function App() {
         await refreshRandomResults();
       } else if (data.command === 'show-all-screenshots-for-media-item') {
         await showMediaItemScreenshotsAtTop(data.mediaItemId);
+      } else if (data.command === 'move-media-item-to-list' || data.command === 'add-media-item-to-list') {
+        await window.electronAPI.addMediaItemToList({
+          listId: data.targetListId,
+          mediaItemId: data.mediaItemId,
+        });
+
+        if (data.command === 'move-media-item-to-list' && data.currentListId) {
+          await window.electronAPI.removeMediaItemFromList({
+            listId: data.currentListId,
+            mediaItemId: data.mediaItemId,
+          });
+        }
+
+        const currentSelectedListId = selectedMediaListIdRef.current;
+        const currentActiveAddToListId = activeAddToListIdRef.current;
+
+        await refreshMediaLists(data.currentListId || currentSelectedListId, currentActiveAddToListId);
+
+        if (currentSelectedListId) {
+          await refreshSelectedMediaListItems(currentSelectedListId, {
+            showEntireLibrary: currentActiveAddToListId === currentSelectedListId && Boolean(currentSelectedListId),
+          });
+        }
+
+        setMediaItems((prev) =>
+          data.command === 'move-media-item-to-list' && data.currentListId && Number(data.currentListId) === Number(currentSelectedListId)
+            ? prev.filter((item) => Number(item.id) !== Number(data.mediaItemId))
+            : prev
+        );
+
+        showSnackbar(
+          data.command === 'move-media-item-to-list'
+            ? `Moved item to "${data.targetListName}".`
+            : `Added item to "${data.targetListName}".`,
+          'success'
+        );
       }
     });
   }, []);
@@ -1066,6 +1289,19 @@ function App() {
       setShowVideoPlayer(Boolean(isVisible));
     });
   }, []);
+
+  useEffect(() => {
+    if (!showVideoPlayer || !videoRef.current || pendingSeekTimeRef.current == null) {
+      return;
+    }
+
+    const seconds = pendingSeekTimeRef.current;
+    pendingSeekTimeRef.current = null;
+    videoRef.current.currentTime = seconds;
+    if (autoPlayOnScreenshotClick) {
+      videoRef.current.play().catch(() => {});
+    }
+  }, [showVideoPlayer, videoPath, autoPlayOnScreenshotClick]);
 
 
 
@@ -1207,6 +1443,8 @@ function App() {
                 src={`file://${videoPath}`}
                 controls
                 muted={isMuted}
+                onTimeUpdate={(e) => setCurrentVideoTime(e.currentTarget.currentTime)}
+                onLoadedMetadata={(e) => setCurrentVideoTime(e.currentTarget.currentTime || 0)}
                 style={{
                   width: '100%',
                   maxHeight: '72vh',
@@ -1215,6 +1453,53 @@ function App() {
                 }}
               />
             </div>
+            <Box
+              sx={{
+                mt: 1.25,
+                p: 1.25,
+                borderRadius: 2,
+                backgroundColor: 'rgba(15, 23, 42, 0.92)',
+                color: '#e2e8f0',
+              }}
+            >
+              <Box
+                sx={{
+                  position: 'relative',
+                  height: 10,
+                  borderRadius: 999,
+                  backgroundColor: 'rgba(148, 163, 184, 0.25)',
+                  overflow: 'hidden',
+                }}
+              >
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    left: `${((autoGenerateInPoint != null ? autoGenerateInPoint : 0) / Math.max(videoRef.current?.duration || 0, 1)) * 100}%`,
+                    width: `${(((autoGenerateOutPoint != null ? autoGenerateOutPoint : videoRef.current?.duration || 0) - (autoGenerateInPoint != null ? autoGenerateInPoint : 0)) / Math.max(videoRef.current?.duration || 0, 1)) * 100}%`,
+                    top: 0,
+                    bottom: 0,
+                    background: 'linear-gradient(90deg, rgba(34,197,94,0.85), rgba(14,165,233,0.85))',
+                  }}
+                />
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    left: `${(currentVideoTime / Math.max(videoRef.current?.duration || 0, 1)) * 100}%`,
+                    top: -3,
+                    width: 2,
+                    height: 16,
+                    backgroundColor: '#fff',
+                    boxShadow: '0 0 0 2px rgba(255,255,255,0.18)',
+                    transform: 'translateX(-1px)',
+                  }}
+                />
+              </Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.75, fontSize: 12, color: '#cbd5e1' }}>
+                <span>In: {formatPlaybackTime(autoGenerateInPoint != null ? autoGenerateInPoint : 0)}</span>
+                <span>Current: {formatPlaybackTime(currentVideoTime)}</span>
+                <span>Out: {formatPlaybackTime(autoGenerateOutPoint != null ? autoGenerateOutPoint : videoRef.current?.duration)}</span>
+              </Box>
+            </Box>
 
             <Stack
               direction="row"
@@ -1289,57 +1574,182 @@ function App() {
               >
                 {isMuted ? 'Unmute' : 'Mute'}
               </Button>
+              <Stack direction="row" spacing={0.5} alignItems="center">
+                <Tooltip title="Mark In">
+                  <span>
+                    <IconButton size="small" color="primary" onClick={setCurrentInPoint}>
+                      <InputIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Jump To In">
+                  <span>
+                    <IconButton size="small" color="primary" onClick={jumpToInPoint} disabled={autoGenerateInPoint == null}>
+                      <FirstPageIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Mark Out">
+                  <span>
+                    <IconButton size="small" color="secondary" onClick={setCurrentOutPoint}>
+                      <OutputIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Jump To Out">
+                  <span>
+                    <IconButton size="small" color="secondary" onClick={jumpToOutPoint} disabled={autoGenerateOutPoint == null}>
+                      <LastPageIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Clear In/Out Range">
+                  <span>
+                    <IconButton
+                      size="small"
+                      color="inherit"
+                      onClick={clearInOutPoints}
+                      disabled={autoGenerateInPoint == null && autoGenerateOutPoint == null}
+                    >
+                      <RestartAltIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Export Selected Range">
+                  <span>
+                    <IconButton
+                      size="small"
+                      color="success"
+                      onClick={exportSelectedRange}
+                      disabled={
+                        autoGenerateInPoint == null ||
+                        autoGenerateOutPoint == null ||
+                        autoGenerateOutPoint <= autoGenerateInPoint
+                      }
+                    >
+                      <SaveAltIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              </Stack>
+              {(autoGenerateInPoint != null || autoGenerateOutPoint != null) && (
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  color="secondary"
+                  label={`${formatPlaybackTime(autoGenerateInPoint != null ? autoGenerateInPoint : 0)} - ${formatPlaybackTime(autoGenerateOutPoint != null ? autoGenerateOutPoint : videoRef.current?.duration)}`}
+                />
+              )}
             </Stack>
 
             <div style={{ marginTop: 18 }}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  marginBottom: 10,
-                }}
-              >
-                <h3 style={{ margin: 0 }}>Screenshots ({screenshots.length})</h3>
-                <span style={{ fontSize: 13, color: '#64748b' }}>
-                  Click a screenshot to seek the video
-                </span>
-              </div>
-              <div
-                style={{
-                  maxHeight: 260,
-                  overflowY: 'auto',
-                  padding: 8,
-                  borderRadius: 14,
+              <Box
+                sx={{
+                  borderRadius: 2,
                   background: 'rgba(255,255,255,0.68)',
                   border: '1px solid rgba(148, 163, 184, 0.25)',
+                  overflow: 'hidden',
                 }}
               >
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                  {screenshots.map((shot, idx) => (
-                    <img
-                      key={idx}
-                      src={`file://${shot.path}`}
-                      style={{
-                        width: 160,
-                        height: 90,
-                        objectFit: 'cover',
-                        borderRadius: 10,
-                        cursor: 'pointer',
-                        boxShadow: '0 4px 14px rgba(15, 23, 42, 0.12)',
-                      }}
-                      onClick={() =>
-                        handleScreenshotInteraction({
-                          mediaItemId: currentMediaItemId,
-                          mediaName: currentVideoName || shot.name,
-                          onDefault: async () => seekToScreenshot(shot),
-                        })
-                      }
-                      alt={shot.name}
-                    />
-                  ))}
-                </div>
-              </div>
+                <Tabs
+                  value={mediaDetailTab}
+                  onChange={(_event, nextValue) => setMediaDetailTab(nextValue)}
+                  sx={{ px: 1, borderBottom: '1px solid rgba(148, 163, 184, 0.2)' }}
+                >
+                  <Tab value="screenshots" label={`Screenshots (${screenshots.length})`} />
+                  <Tab value="exports" label={`Video Exports (${exportedVideos.length})`} />
+                </Tabs>
+                <Box sx={{ p: 1.25 }}>
+                  {mediaDetailTab === 'screenshots' && (
+                    <>
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.25 }}>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                          Screenshots
+                        </Typography>
+                        <Typography variant="body2" sx={{ color: '#64748b' }}>
+                          Click a screenshot to seek the video
+                        </Typography>
+                      </Box>
+                      <Box sx={{ maxHeight: 260, overflowY: 'auto', p: 0.5 }}>
+                        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.25 }}>
+                          {screenshots.map((shot, idx) => (
+                            <img
+                              key={idx}
+                              src={`file://${shot.path}`}
+                              style={{
+                                width: 160,
+                                height: 90,
+                                objectFit: 'cover',
+                                borderRadius: 10,
+                                cursor: 'pointer',
+                                boxShadow: '0 4px 14px rgba(15, 23, 42, 0.12)',
+                              }}
+                              onClick={() =>
+                                handleScreenshotInteraction({
+                                  mediaItemId: currentMediaItemId,
+                                  mediaName: currentVideoName || shot.name,
+                                  onDefault: async () => seekToScreenshot(shot),
+                                })
+                              }
+                              alt={shot.name}
+                            />
+                          ))}
+                        </Box>
+                      </Box>
+                    </>
+                  )}
+                  {mediaDetailTab === 'exports' && (
+                    <>
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.25 }}>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                          Video Exports
+                        </Typography>
+                        <Typography variant="body2" sx={{ color: '#64748b' }}>
+                          Exported clips from this media item
+                        </Typography>
+                      </Box>
+                      {exportedVideos.length === 0 ? (
+                        <Typography variant="body2" sx={{ color: '#64748b' }}>
+                          No exported clips yet.
+                        </Typography>
+                      ) : (
+                        <Box sx={{ maxHeight: 320, overflowY: 'auto', p: 0.5 }}>
+                          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.25 }}>
+                            {exportedVideos.map((clip) => (
+                              <Box
+                                key={clip.id}
+                                sx={{
+                                  width: 240,
+                                  borderRadius: 2,
+                                  overflow: 'hidden',
+                                  backgroundColor: '#fff',
+                                  boxShadow: '0 4px 14px rgba(15, 23, 42, 0.12)',
+                                }}
+                              >
+                                <video
+                                  src={`file://${clip.file_path}`}
+                                  controls
+                                  muted
+                                  defaultMuted
+                                  style={{ width: '100%', height: 136, display: 'block', background: '#000' }}
+                                />
+                                <Box sx={{ p: 1 }}>
+                                  <Typography variant="body2" sx={{ fontWeight: 700, wordBreak: 'break-word' }}>
+                                    {clip.file_name}
+                                  </Typography>
+                                  <Typography variant="caption" color="text.secondary">
+                                    {formatPlaybackTime(clip.start_seconds)} - {formatPlaybackTime(clip.end_seconds)}
+                                  </Typography>
+                                </Box>
+                              </Box>
+                            ))}
+                          </Box>
+                        </Box>
+                      )}
+                    </>
+                  )}
+                </Box>
+              </Box>
             </div>
           </div>
         </div>
@@ -1464,7 +1874,7 @@ function App() {
                 style={{ flex: '1 0 auto', height: 'auto', maxWidth: `calc(100% / ${screenshotsPerRow})`, objectFit: 'contain', cursor: 'pointer' }}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  window.electronAPI.showContextMenu({
+                  openItemContextMenu({
                     screenshotId: id,
                     screenshotPath,
                     mediaItemId: mediaItem?.id,
@@ -1509,7 +1919,7 @@ function App() {
             style={{ flex: '1 0 auto', height: 'auto', maxWidth: `calc(100% / ${screenshotsPerRow})`, objectFit: 'contain', cursor: 'pointer' }}
             onContextMenu={(e) => {
               e.preventDefault();
-              window.electronAPI.showContextMenu({
+              openItemContextMenu({
                 screenshotId: id,
                 screenshotPath,
                 mediaItemId: mediaItem?.id,
@@ -1553,7 +1963,7 @@ function App() {
                 e.preventDefault();
                 console.log("onContextMenu: item = ", item);
                 console.log("screenshots[0]: ", item.screenshots[0])
-                window.electronAPI.showContextMenu({
+                openItemContextMenu({
                   mediaItemId: item.id,
                   filePath: item.file_name,
                   screenshotId: item.screenshots[0]?.id,
@@ -1592,12 +2002,7 @@ function App() {
                             setCurrentMediaItemId(item.id);
                             const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(item.id, 1000);
                             setScreenshots(screenshotRows.map(mapScreenshotRecord));
-                            setTimeout(() => {
-                              if (videoRef.current) {
-                                videoRef.current.currentTime = seconds;
-                                videoRef.current.play();
-                              }
-                            }, 100);
+                            requestVideoPlayerSeek(seconds);
                           },
                         })
                       }
