@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getMediaItemByName: (name) => ipcRenderer.invoke('get-media-item-by-name', name),
   getMediaItemById: (mediaItemId) => ipcRenderer.invoke('get-media-item-by-id', mediaItemId),
   updateMediaItemImageList: (payload) => ipcRenderer.invoke('update-media-item-image-list', payload),
+  deleteUnselectedScreenshotsForMediaItem: (payload) => ipcRenderer.invoke('delete-unselected-screenshots-for-media-item', payload),
   getAllMediaItems: () => ipcRenderer.invoke('get-all-media-items'),
   getMediaLists: () => ipcRenderer.invoke('get-media-lists'),
   createMediaList: (name) => ipcRenderer.invoke('create-media-list', name),

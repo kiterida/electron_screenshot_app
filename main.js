@@ -400,6 +400,106 @@ function updateMediaItemImageList(mediaItemId, imageList) {
   return db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaItemId);
 }
 
+function deleteMediaItem(mediaItemId) {
+  const normalizedMediaItemId = Number(mediaItemId);
+  if (!Number.isInteger(normalizedMediaItemId) || normalizedMediaItemId <= 0) {
+    throw new Error('A valid media item is required.');
+  }
+
+  const screenshots = db.prepare(`
+    SELECT id, file_path
+    FROM screenshots
+    WHERE media_item_id = ?
+  `).all(normalizedMediaItemId);
+
+  const deleteTransaction = db.transaction(() => {
+    db.prepare('DELETE FROM screenshots WHERE media_item_id = ?').run(normalizedMediaItemId);
+    db.prepare('DELETE FROM media_items WHERE id = ?').run(normalizedMediaItemId);
+  });
+
+  deleteTransaction();
+
+  screenshots.forEach((row) => {
+    try {
+      if (row.file_path && fs.existsSync(row.file_path)) {
+        fs.unlinkSync(row.file_path);
+      }
+    } catch (error) {
+      console.warn(`Failed to delete screenshot file: ${row.file_path}`, error);
+    }
+  });
+
+  return {
+    deletedMediaItemId: normalizedMediaItemId,
+    deletedScreenshotCount: screenshots.length,
+  };
+}
+
+function deleteUnselectedScreenshotsForMediaItem(mediaItemId, keepScreenshotIds = []) {
+  const normalizedMediaItemId = Number(mediaItemId);
+  if (!Number.isInteger(normalizedMediaItemId) || normalizedMediaItemId <= 0) {
+    throw new Error('A valid media item is required.');
+  }
+
+  const keepIds = Array.isArray(keepScreenshotIds)
+    ? keepScreenshotIds
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    : [];
+
+  const screenshots = db.prepare(`
+    SELECT id, file_path
+    FROM screenshots
+    WHERE media_item_id = ?
+  `).all(normalizedMediaItemId);
+
+  const keepIdSet = new Set(keepIds);
+  const screenshotsToDelete = screenshots.filter((row) => !keepIdSet.has(Number(row.id)));
+
+  const deleteScreenshot = db.prepare(`
+    DELETE FROM screenshots
+    WHERE id = ? AND media_item_id = ?
+  `);
+
+  const transaction = db.transaction((rows) => {
+    rows.forEach((row) => {
+      deleteScreenshot.run(row.id, normalizedMediaItemId);
+    });
+  });
+
+  transaction(screenshotsToDelete);
+
+  screenshotsToDelete.forEach((row) => {
+    try {
+      if (row.file_path && fs.existsSync(row.file_path)) {
+        fs.unlinkSync(row.file_path);
+      }
+    } catch (error) {
+      console.warn(`Failed to delete screenshot file: ${row.file_path}`, error);
+    }
+  });
+
+  const existingKeepIds = new Set(
+    db.prepare(`
+      SELECT id
+      FROM screenshots
+      WHERE media_item_id = ?
+    `).all(normalizedMediaItemId).map((row) => Number(row.id))
+  );
+
+  const existingMediaItem = db.prepare('SELECT * FROM media_items WHERE id = ?').get(normalizedMediaItemId);
+  const nextImageList = parseMediaImageList(existingMediaItem?.image_list).map((id) => (
+    id && existingKeepIds.has(Number(id)) ? Number(id) : null
+  ));
+  const updatedMediaItem = updateMediaItemImageList(normalizedMediaItemId, nextImageList);
+
+  return {
+    deletedCount: screenshotsToDelete.length,
+    deletedScreenshotIds: screenshotsToDelete.map((row) => Number(row.id)),
+    updatedMediaItem,
+  };
+}
+
 function ensureMediaList(name) {
   const trimmedName = (name || '').trim();
   if (!trimmedName) {
@@ -1233,8 +1333,12 @@ ipcMain.handle('read-screenshots', async (event, folder, videoFilename, imageCou
 
 
 ipcMain.handle('delete-media-item', async (event, id) => {
-  db.prepare('DELETE FROM media_items WHERE id = ?').run(id);
-  return true;
+  try {
+    return deleteMediaItem(id);
+  } catch (error) {
+    console.error('Failed to delete media item:', error);
+    throw error;
+  }
 });
 
 ipcMain.on('open-screenshot-folder', (event, filePath) => {
@@ -1400,6 +1504,15 @@ ipcMain.handle('update-media-item-image-list', async (event, { mediaItemId, imag
     return updateMediaItemImageList(mediaItemId, imageList);
   } catch (error) {
     console.error('Failed to update media item image list:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('delete-unselected-screenshots-for-media-item', async (event, { mediaItemId, keepScreenshotIds }) => {
+  try {
+    return deleteUnselectedScreenshotsForMediaItem(mediaItemId, keepScreenshotIds);
+  } catch (error) {
+    console.error('Failed to delete unselected screenshots for media item:', error);
     throw error;
   }
 });

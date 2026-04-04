@@ -90,6 +90,8 @@ function App() {
   const [topMediaItemName, setTopMediaItemName] = useState('');
   const [topMediaItem, setTopMediaItem] = useState(null);
   const [isSelectingTopScreens, setIsSelectingTopScreens] = useState(false);
+  const [isManagingTopScreenshots, setIsManagingTopScreenshots] = useState(false);
+  const [managedTopScreenshotIds, setManagedTopScreenshotIds] = useState([]);
   const [selectedTopScreenSlot, setSelectedTopScreenSlot] = useState(null);
   const [openMediaTable, setOpenMediaTable] = useState(false);
   const [randomStartupComplete, setRandomStartupComplete] = useState(false);
@@ -233,6 +235,15 @@ function App() {
       const screenshotId = selectedIds[index];
       return screenshotId ? screenshotMap.get(Number(screenshotId)) || null : null;
     });
+  };
+
+  const getDefaultManagedTopScreenshotIds = () => {
+    const preferredIds = parseMediaImageList(topMediaItem?.image_list).filter(Boolean);
+    if (preferredIds.length > 0) {
+      return preferredIds.map((id) => Number(id));
+    }
+
+    return topMediaItemScreenshots.slice(0, 8).map((row) => Number(row.id));
   };
 
   const refreshRandomResults = async () => {
@@ -608,6 +619,8 @@ function App() {
 
     setTopMediaItem(mediaItem);
     setTopMediaItemName(mediaItem?.name || mediaItem?.file_name || 'Media Item');
+    setIsManagingTopScreenshots(false);
+    setManagedTopScreenshotIds([]);
     setTopMediaItemScreenshots(
       screenshotRows.map((row) => ({
         ...row,
@@ -623,6 +636,8 @@ function App() {
     setTopMediaItemName('');
     setTopMediaItem(null);
     setIsSelectingTopScreens(false);
+    setIsManagingTopScreenshots(false);
+    setManagedTopScreenshotIds([]);
     setSelectedTopScreenSlot(null);
   };
 
@@ -670,6 +685,70 @@ function App() {
     nextIds[slotIndex] = null;
     await saveTopScreenSlots(nextIds);
     setSelectedTopScreenSlot(slotIndex);
+  };
+
+  const toggleManageTopScreenshots = () => {
+    setIsManagingTopScreenshots((prev) => {
+      const next = !prev;
+      if (next) {
+        setIsSelectingTopScreens(false);
+        setSelectedTopScreenSlot(null);
+        setManagedTopScreenshotIds(getDefaultManagedTopScreenshotIds());
+      } else {
+        setManagedTopScreenshotIds([]);
+      }
+      return next;
+    });
+  };
+
+  const toggleManagedTopScreenshot = (screenshotId) => {
+    const normalizedId = Number(screenshotId);
+    setManagedTopScreenshotIds((prev) => (
+      prev.includes(normalizedId)
+        ? prev.filter((id) => id !== normalizedId)
+        : [...prev, normalizedId]
+    ));
+  };
+
+  const deleteUnselectedTopScreenshots = async () => {
+    if (!topMediaItem?.id) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${Math.max(topMediaItemScreenshots.length - managedTopScreenshotIds.length, 0)} unselected screenshot(s) from "${topMediaItemName}"?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const result = await window.electronAPI.deleteUnselectedScreenshotsForMediaItem({
+        mediaItemId: topMediaItem.id,
+        keepScreenshotIds: managedTopScreenshotIds,
+      });
+
+      if (result?.updatedMediaItem) {
+        syncMediaItemImageListState(result.updatedMediaItem);
+        setTopMediaItem(result.updatedMediaItem);
+      }
+
+      const screenshotRows = await window.electronAPI.getScreenshotsForMediaItem(topMediaItem.id, 5000);
+      setTopMediaItemScreenshots(
+        screenshotRows.map((row) => ({
+          ...row,
+          mediaItem: result?.updatedMediaItem || topMediaItem,
+        }))
+      );
+      setManagedTopScreenshotIds([]);
+      setIsManagingTopScreenshots(false);
+
+      showSnackbar(`Deleted ${result?.deletedCount || 0} unselected screenshot(s).`, 'success');
+    } catch (error) {
+      console.error('deleteUnselectedTopScreenshots failed:', error);
+      showSnackbar('Failed to delete unselected screenshots.', 'error');
+    }
   };
 
   useEffect(() => {
@@ -1775,6 +1854,8 @@ function App() {
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button
                 onClick={() => {
+                  setIsManagingTopScreenshots(false);
+                  setManagedTopScreenshotIds([]);
                   setIsSelectingTopScreens((prev) => {
                     const next = !prev;
                     setSelectedTopScreenSlot(null);
@@ -1784,6 +1865,9 @@ function App() {
               >
                 {isSelectingTopScreens ? 'Done Selecting Top 8' : 'Select Top 8 Screens'}
               </button>
+              <button onClick={toggleManageTopScreenshots}>
+                {isManagingTopScreenshots ? 'Done Managing Screenshots' : 'Manage Screenshots'}
+              </button>
               <button
                 onClick={closeTopMediaItemScreenshots}
               >
@@ -1791,6 +1875,31 @@ function App() {
               </button>
             </div>
           </div>
+          {isManagingTopScreenshots && (
+            <div
+              style={{
+                position: 'sticky',
+                top: 8,
+                left: 8,
+                zIndex: 4,
+                margin: '0 8px 8px',
+                width: 'fit-content',
+                padding: 12,
+                borderRadius: 14,
+                border: '1px solid rgba(148, 163, 184, 0.35)',
+                background: 'rgba(255,255,255,0.97)',
+                boxShadow: '0 10px 28px rgba(15, 23, 42, 0.12)',
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>Manage Screenshots</div>
+              <div style={{ fontSize: 13, color: '#475569', marginBottom: 10 }}>
+                {managedTopScreenshotIds.length} selected
+              </div>
+              <button onClick={deleteUnselectedTopScreenshots}>
+                Delete Unselected
+              </button>
+            </div>
+          )}
           {isSelectingTopScreens && (
             <div
               style={{
@@ -1871,7 +1980,14 @@ function App() {
             {topMediaItemScreenshots.map(({ id, file_path: screenshotPath, mediaItem }, i) => (
               <div
                 key={`top-media-${id}-${i}`}
-                style={{ flex: '1 0 auto', height: 'auto', maxWidth: `calc(100% / ${screenshotsPerRow})`, objectFit: 'contain', cursor: 'pointer' }}
+                style={{
+                  flex: '1 0 auto',
+                  height: 'auto',
+                  maxWidth: `calc(100% / ${screenshotsPerRow})`,
+                  objectFit: 'contain',
+                  cursor: 'pointer',
+                  position: 'relative',
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   openItemContextMenu({
@@ -1887,6 +2003,11 @@ function App() {
                   alt=""
                   style={{ width: '100%', height: '100%', objectFit: 'cover', cursor: 'pointer' }}
                   onClick={async () => {
+                    if (isManagingTopScreenshots) {
+                      toggleManagedTopScreenshot(id);
+                      return;
+                    }
+
                     const handledByTopSelector = await handleTopScreenshotSelected(id);
                     if (handledByTopSelector) {
                       return;
@@ -1898,6 +2019,43 @@ function App() {
                     });
                   }}
                 />
+                {isManagingTopScreenshots && (
+                  <>
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 8,
+                        left: 8,
+                        width: 22,
+                        height: 22,
+                        borderRadius: 6,
+                        background: 'rgba(255,255,255,0.95)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        boxShadow: '0 4px 12px rgba(15, 23, 42, 0.18)',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={managedTopScreenshotIds.includes(Number(id))}
+                        readOnly
+                        style={{ pointerEvents: 'none' }}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        position: 'absolute',
+                        inset: 0,
+                        border: managedTopScreenshotIds.includes(Number(id))
+                          ? '3px solid rgba(37, 99, 235, 0.9)'
+                          : '3px solid rgba(148, 163, 184, 0.55)',
+                        boxSizing: 'border-box',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  </>
+                )}
               </div>
             ))}
           </div>
