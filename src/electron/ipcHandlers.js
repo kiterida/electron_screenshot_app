@@ -21,7 +21,7 @@ function registerIpcHandlers() {
     ipcMain.handle('select-folder', async () => {
         const result = await dialog.showOpenDialog({
             properties: ['openFile'],
-            filters: [{ name: 'Videos', extensions: ['mp4', 'mov', 'webm'] }],
+            filters: [{ name: 'Videos', extensions: ['mp4', 'mov', 'webm', 'wmv'] }],
         });
         if (!result.canceled) return result.filePaths;
         return null;
@@ -31,7 +31,7 @@ function registerIpcHandlers() {
         const result = await dialog.showOpenDialog({
             properties: ['openFile'],
             filters: [
-                { name: 'Videos', extensions: ['mp4', 'mov', 'avi', 'mkv'] }
+                { name: 'Videos', extensions: ['mp4', 'mov', 'avi', 'mkv', 'wmv'] }
             ]
         });
         if (!result.canceled && result.filePaths.length > 0) {

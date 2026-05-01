@@ -72,9 +72,29 @@ function ensureDatabaseSchema(database) {
       name TEXT,
       tags TEXT,
       file_name TEXT,
-      image_list TEXT
+      image_list TEXT,
+      parent_media_item_id INTEGER,
+      section_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (parent_media_item_id) REFERENCES media_items(id) ON DELETE SET NULL
     )
   `).run();
+
+  const mediaItemsColumns = database.prepare(`PRAGMA table_info(media_items)`).all();
+  const mediaItemColumnNames = new Set(mediaItemsColumns.map((column) => column.name));
+
+  if (!mediaItemColumnNames.has('parent_media_item_id')) {
+    database.prepare(`
+      ALTER TABLE media_items
+      ADD COLUMN parent_media_item_id INTEGER REFERENCES media_items(id) ON DELETE SET NULL
+    `).run();
+  }
+
+  if (!mediaItemColumnNames.has('section_order')) {
+    database.prepare(`
+      ALTER TABLE media_items
+      ADD COLUMN section_order INTEGER NOT NULL DEFAULT 0
+    `).run();
+  }
 
   database.prepare(`
     CREATE TABLE IF NOT EXISTS screenshots (
@@ -117,6 +137,32 @@ function ensureDatabaseSchema(database) {
   database.prepare(`
     CREATE INDEX IF NOT EXISTS idx_exported_videos_media_item_id
     ON exported_videos (media_item_id)
+  `).run();
+
+  database.prepare(`
+    CREATE TABLE IF NOT EXISTS video_export_sequences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+
+  database.prepare(`
+    CREATE TABLE IF NOT EXISTS video_export_sequence_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sequence_id INTEGER NOT NULL,
+      position INTEGER NOT NULL,
+      exported_video_id INTEGER NOT NULL,
+      UNIQUE(sequence_id, position),
+      FOREIGN KEY (sequence_id) REFERENCES video_export_sequences(id) ON DELETE CASCADE,
+      FOREIGN KEY (exported_video_id) REFERENCES exported_videos(id) ON DELETE CASCADE
+    )
+  `).run();
+
+  database.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_video_export_sequence_items_sequence_id
+    ON video_export_sequence_items (sequence_id, position)
   `).run();
 
   database.prepare(`
@@ -167,6 +213,10 @@ function normalizeScreenshotPath(filePath) {
 
 function normalizeFilePath(filePath) {
   return path.resolve(filePath).replace(/\\/g, '/');
+}
+
+function getMediaGroupingId(mediaItemId, parentMediaItemId) {
+  return parentMediaItemId ? Number(parentMediaItemId) : Number(mediaItemId);
 }
 
 function getMediaBaseName(filePathOrName) {
@@ -305,6 +355,21 @@ function getMediaItemByFilePath(filePath) {
   }
 
   return null;
+}
+
+function getOrderedMediaItemsQuery(additionalSelect = '', joinClause = '', whereClause = '') {
+  return `
+    SELECT
+      m.*${additionalSelect ? `,\n      ${additionalSelect}` : ''}
+    FROM media_items m
+    ${joinClause}
+    ${whereClause}
+    ORDER BY
+      COALESCE(m.parent_media_item_id, m.id) ASC,
+      CASE WHEN m.parent_media_item_id IS NULL THEN 0 ELSE 1 END ASC,
+      m.section_order ASC,
+      m.id ASC
+  `;
 }
 
 function getMediaLists() {
@@ -569,15 +634,101 @@ function removeMediaItemFromList(listId, mediaItemId) {
 }
 
 function getMediaItemsForList(listId) {
-  return db.prepare(`
-    SELECT
-      m.*,
-      mli.created_at AS added_to_list_at
-    FROM media_list_items mli
-    INNER JOIN media_items m ON m.id = mli.media_item_id
-    WHERE mli.list_id = ?
-    ORDER BY mli.created_at DESC, m.id DESC
-  `).all(listId);
+  return db.prepare(getOrderedMediaItemsQuery(
+    'mli.created_at AS added_to_list_at',
+    'INNER JOIN media_list_items mli ON m.id = mli.media_item_id',
+    'WHERE mli.list_id = ?'
+  )).all(listId);
+}
+
+function getAllMediaItemsOrdered() {
+  return db.prepare(getOrderedMediaItemsQuery()).all();
+}
+
+function createMediaSection(mediaItemId) {
+  const normalizedMediaItemId = Number(mediaItemId);
+  if (!Number.isInteger(normalizedMediaItemId) || normalizedMediaItemId <= 0) {
+    throw new Error('A valid media item is required.');
+  }
+
+  const sourceItem = db.prepare(`
+    SELECT *
+    FROM media_items
+    WHERE id = ?
+  `).get(normalizedMediaItemId);
+
+  if (!sourceItem) {
+    throw new Error('The selected media item could not be found.');
+  }
+
+  const rootMediaItemId = sourceItem.parent_media_item_id
+    ? Number(sourceItem.parent_media_item_id)
+    : Number(sourceItem.id);
+
+  const rootMediaItem = db.prepare(`
+    SELECT *
+    FROM media_items
+    WHERE id = ?
+  `).get(rootMediaItemId);
+
+  if (!rootMediaItem) {
+    throw new Error('The original media item could not be found.');
+  }
+
+  const nextSectionOrderRow = db.prepare(`
+    SELECT COALESCE(MAX(section_order), 0) AS max_section_order
+    FROM media_items
+    WHERE id = ? OR parent_media_item_id = ?
+  `).get(rootMediaItemId, rootMediaItemId);
+
+  const nextSectionOrder = Number(nextSectionOrderRow?.max_section_order || 0) + 1;
+  const sectionName = `${rootMediaItem.name} - Section ${nextSectionOrder}`;
+
+  const createSectionTransaction = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT INTO media_items (
+        name,
+        tags,
+        file_name,
+        image_list,
+        parent_media_item_id,
+        section_order
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      sectionName,
+      rootMediaItem.tags || '',
+      rootMediaItem.file_name,
+      JSON.stringify([]),
+      rootMediaItemId,
+      nextSectionOrder
+    );
+
+    const newMediaItemId = Number(result.lastInsertRowid);
+
+    const listRows = db.prepare(`
+      SELECT list_id
+      FROM media_list_items
+      WHERE media_item_id = ?
+    `).all(normalizedMediaItemId);
+
+    const addToListStatement = db.prepare(`
+      INSERT OR IGNORE INTO media_list_items (list_id, media_item_id)
+      VALUES (?, ?)
+    `);
+
+    listRows.forEach((row) => {
+      addToListStatement.run(row.list_id, newMediaItemId);
+    });
+
+    return db.prepare(`
+      SELECT *
+      FROM media_items
+      WHERE id = ?
+    `).get(newMediaItemId);
+  });
+
+  return createSectionTransaction();
 }
 
 function insertScreenshot(mediaItemId, screenshotPath, timestampSeconds) {
@@ -1110,6 +1261,153 @@ function getExportedVideosForMediaItem(mediaItemId) {
   `).all(mediaItemId);
 }
 
+function getVideoExportSequences() {
+  return db.prepare(`
+    SELECT
+      s.id,
+      s.name,
+      s.created_at,
+      s.updated_at,
+      COUNT(i.id) AS item_count
+    FROM video_export_sequences s
+    LEFT JOIN video_export_sequence_items i
+      ON i.sequence_id = s.id
+    GROUP BY s.id
+    ORDER BY s.updated_at DESC, s.name COLLATE NOCASE ASC
+  `).all();
+}
+
+function getVideoExportSequenceById(sequenceId) {
+  const sequence = db.prepare(`
+    SELECT id, name, created_at, updated_at
+    FROM video_export_sequences
+    WHERE id = ?
+  `).get(sequenceId);
+
+  if (!sequence) {
+    return null;
+  }
+
+  const items = db.prepare(`
+    SELECT
+      i.position,
+      v.*
+    FROM video_export_sequence_items i
+    INNER JOIN exported_videos v
+      ON v.id = i.exported_video_id
+    WHERE i.sequence_id = ?
+    ORDER BY i.position ASC
+  `).all(sequenceId);
+
+  return {
+    ...sequence,
+    clips: items,
+  };
+}
+
+function saveVideoExportSequence({ sequenceId = null, name, exportedVideoIds }) {
+  const trimmedName = String(name || '').trim();
+  const normalizedIds = Array.isArray(exportedVideoIds)
+    ? exportedVideoIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+
+  if (!trimmedName) {
+    throw new Error('A sequence name is required.');
+  }
+
+  if (normalizedIds.length === 0) {
+    throw new Error('A sequence must contain at least one exported video.');
+  }
+
+  const saveTransaction = db.transaction(() => {
+    let resolvedSequenceId = sequenceId ? Number(sequenceId) : null;
+
+    if (resolvedSequenceId) {
+      const existingById = db.prepare(`
+        SELECT id
+        FROM video_export_sequences
+        WHERE id = ?
+      `).get(resolvedSequenceId);
+
+      if (!existingById) {
+        throw new Error('The selected sequence could not be found.');
+      }
+
+      const conflictingName = db.prepare(`
+        SELECT id
+        FROM video_export_sequences
+        WHERE name = ? AND id != ?
+      `).get(trimmedName, resolvedSequenceId);
+
+      if (conflictingName) {
+        throw new Error('Another saved sequence already uses that name.');
+      }
+
+      db.prepare(`
+        UPDATE video_export_sequences
+        SET name = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(trimmedName, resolvedSequenceId);
+    } else {
+      const existingByName = db.prepare(`
+        SELECT id
+        FROM video_export_sequences
+        WHERE name = ?
+      `).get(trimmedName);
+
+      if (existingByName) {
+        resolvedSequenceId = existingByName.id;
+        db.prepare(`
+          UPDATE video_export_sequences
+          SET updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(resolvedSequenceId);
+      } else {
+        const insertResult = db.prepare(`
+          INSERT INTO video_export_sequences (name)
+          VALUES (?)
+        `).run(trimmedName);
+        resolvedSequenceId = insertResult.lastInsertRowid;
+      }
+    }
+
+    db.prepare(`
+      DELETE FROM video_export_sequence_items
+      WHERE sequence_id = ?
+    `).run(resolvedSequenceId);
+
+    const insertItem = db.prepare(`
+      INSERT INTO video_export_sequence_items (sequence_id, position, exported_video_id)
+      VALUES (?, ?, ?)
+    `);
+
+    normalizedIds.forEach((exportedVideoId, index) => {
+      const exportedVideo = db.prepare(`
+        SELECT id
+        FROM exported_videos
+        WHERE id = ?
+      `).get(exportedVideoId);
+
+      if (!exportedVideo) {
+        throw new Error(`Exported video ${exportedVideoId} could not be found.`);
+      }
+
+      insertItem.run(resolvedSequenceId, index, exportedVideoId);
+    });
+
+    return getVideoExportSequenceById(resolvedSequenceId);
+  });
+
+  return saveTransaction();
+}
+
+function deleteVideoExportSequence(sequenceId) {
+  return db.prepare(`
+    DELETE FROM video_export_sequences
+    WHERE id = ?
+  `).run(sequenceId);
+}
+
 ipcMain.handle('select-screenshot-folder', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   if (!result.canceled && result.filePaths[0]) {
@@ -1127,7 +1425,7 @@ ipcMain.on('open-video-dialog', async (event) => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
     filters: [
-      { name: 'Videos', extensions: ['mp4', 'webm', 'mov'] },
+      { name: 'Videos', extensions: ['mp4', 'webm', 'mov', 'wmv'] },
     ],
   });
 
@@ -1148,7 +1446,7 @@ ipcMain.handle('add-media-item', async (event, { name, fileName }) => {
 });
 
 ipcMain.handle('get-media-items', async () => {
-  return db.prepare('SELECT * FROM media_items').all();
+  return getAllMediaItemsOrdered();
 });
 
 ipcMain.handle('get-or-create-media-item', async (event, filePath) => {
@@ -1198,6 +1496,42 @@ ipcMain.handle('get-exported-videos-for-media-item', async (event, mediaItemId) 
     return getExportedVideosForMediaItem(mediaItemId);
   } catch (error) {
     console.error('Failed to load exported videos for media item:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('get-video-export-sequences', async () => {
+  try {
+    return getVideoExportSequences();
+  } catch (error) {
+    console.error('Failed to load video export sequences:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('get-video-export-sequence-by-id', async (event, sequenceId) => {
+  try {
+    return getVideoExportSequenceById(sequenceId);
+  } catch (error) {
+    console.error('Failed to load video export sequence by id:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('save-video-export-sequence', async (event, payload) => {
+  try {
+    return saveVideoExportSequence(payload || {});
+  } catch (error) {
+    console.error('Failed to save video export sequence:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('delete-video-export-sequence', async (event, sequenceId) => {
+  try {
+    return deleteVideoExportSequence(sequenceId);
+  } catch (error) {
+    console.error('Failed to delete video export sequence:', error);
     throw error;
   }
 });
@@ -1293,6 +1627,15 @@ ipcMain.handle('get-media-item-by-id', async (event, mediaItemId) => {
     return db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaItemId);
   } catch (error) {
     console.error('Failed to load media item by id:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('create-media-section', async (event, mediaItemId) => {
+  try {
+    return createMediaSection(mediaItemId);
+  } catch (error) {
+    console.error('Failed to create media section:', error);
     throw error;
   }
 });
@@ -1441,8 +1784,7 @@ ipcMain.handle('ignore-random-screenshot', (event, screenshotPath) => {
 
 
 ipcMain.handle('get-all-media-items', async () => {
-  const rows = db.prepare('SELECT * FROM media_items').all();
-  return rows;
+  return getAllMediaItemsOrdered();
 });
 
 ipcMain.handle('get-media-lists', async () => {
@@ -1617,6 +1959,16 @@ ipcMain.on('show-context-menu', (event, payload = {}) => {
       click: () => {
         event.sender.send('context-menu-command', {
           command: 'show-all-screenshots-for-media-item',
+          mediaItemId,
+        });
+      }
+    },
+    {
+      label: 'Create Section',
+      enabled: Boolean(mediaItemId),
+      click: () => {
+        event.sender.send('context-menu-command', {
+          command: 'create-section',
           mediaItemId,
         });
       }

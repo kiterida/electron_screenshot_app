@@ -33,6 +33,7 @@ export default function MediaListsDialog({
   const openRef = useRef(open);
   const onListsChangedRef = useRef(onListsChanged);
   const showSnackbarRef = useRef(showSnackbar);
+  const newListInputRef = useRef(null);
 
   const loadRowsForList = async (listId) => {
     if (!listId) {
@@ -83,6 +84,11 @@ export default function MediaListsDialog({
   useEffect(() => {
     showSnackbarRef.current = showSnackbar;
   }, [showSnackbar]);
+
+  const focusNewListInput = () => {
+    newListInputRef.current?.focus();
+    newListInputRef.current?.select?.();
+  };
 
   useEffect(() => {
     if (!open) {
@@ -281,7 +287,14 @@ export default function MediaListsDialog({
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xl" fullWidth>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="xl"
+      fullWidth
+      disableRestoreFocus
+      TransitionProps={{ onEntered: focusNewListInput }}
+    >
       <DialogTitle>
         Media Lists
         <IconButton
@@ -299,6 +312,8 @@ export default function MediaListsDialog({
               label="New List Name"
               value={newListName}
               onChange={(e) => setNewListName(e.target.value)}
+              inputRef={newListInputRef}
+              autoFocus
               fullWidth
             />
             <Button variant="contained" onClick={handleCreateList}>
