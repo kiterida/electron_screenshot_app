@@ -1,0 +1,30 @@
+how should we go about archiving all files.
+
+currently the archiving system isn't good for looking for files. they are just grouped into big folders.
+It would be better to have them inside their own folders,.
+
+Need a way to indicate that we have alreay looked at the file and are finished editing it.
+
+senarious.
+
+file that has been editing. after we rename it to _cut
+file that doesn't need editing?? _uncut
+file that cant be edited in premier _noCodec
+
+either way, we know that _cut or _uncut or _noCodec means that we have looked at the file and have finished with it.
+Now we can just put all the files into the categories and we know which ones have been looked at.
+
+All files missing _cut or _uncut will need to be looked at.
+
+file needs editing
+
+premiere or custom?
+
+premiere
+- already know how to do
+- will need to manually change directories
+
+
+custom
+- can generate segments of what you want to keep, then press a button to edit it.
+- could automatically change names and reference in database as well as delete old file.

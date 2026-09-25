@@ -326,35 +326,91 @@ function getOrCreateMediaItem(filePath) {
 
 function getMediaItemByFilePath(filePath) {
   const normalizedFilePath = normalizeFilePath(filePath);
-  const mediaName = path.basename(normalizedFilePath);
-
-  let mediaItem = db.prepare(`
+  return db.prepare(`
     SELECT * FROM media_items
     WHERE file_name = ?
     LIMIT 1
   `).get(normalizedFilePath);
+}
 
-  if (mediaItem) {
-    return mediaItem;
-  }
-
-  mediaItem = db.prepare(`
-    SELECT * FROM media_items
+function getMediaItemByExactName(name) {
+  return db.prepare(`
+    SELECT *
+    FROM media_items
     WHERE name = ?
     LIMIT 1
-  `).get(mediaName);
+  `).get(name);
+}
 
-  if (mediaItem) {
-    db.prepare(`
-      UPDATE media_items
-      SET file_name = COALESCE(NULLIF(file_name, ''), ?)
-      WHERE id = ?
-    `).run(normalizedFilePath, mediaItem.id);
-
-    return db.prepare('SELECT * FROM media_items WHERE id = ?').get(mediaItem.id);
+function updateMediaItemFilePath(mediaItemId, filePath) {
+  const normalizedMediaItemId = Number(mediaItemId);
+  if (!Number.isInteger(normalizedMediaItemId) || normalizedMediaItemId <= 0) {
+    throw new Error('A valid media item is required.');
   }
 
-  return null;
+  const normalizedFilePath = normalizeFilePath(filePath);
+
+  db.prepare(`
+    UPDATE media_items
+    SET file_name = ?
+    WHERE id = ?
+  `).run(normalizedFilePath, normalizedMediaItemId);
+
+  return db.prepare('SELECT * FROM media_items WHERE id = ?').get(normalizedMediaItemId);
+}
+
+function updateMediaItemDriveLetters(fromDriveLetter, toDriveLetter) {
+  const normalizedFrom = String(fromDriveLetter || '').trim().replace(':', '').toUpperCase();
+  const normalizedTo = String(toDriveLetter || '').trim().replace(':', '').toUpperCase();
+
+  if (!/^[A-Z]$/.test(normalizedFrom) || !/^[A-Z]$/.test(normalizedTo)) {
+    throw new Error('Both drive letters must be a single letter from A to Z.');
+  }
+
+  if (normalizedFrom === normalizedTo) {
+    throw new Error('The source and destination drive letters must be different.');
+  }
+
+  const likePattern = `${normalizedFrom}:/%`;
+  const rows = db.prepare(`
+    SELECT id, file_name
+    FROM media_items
+    WHERE REPLACE(file_name, '\\', '/') LIKE ?
+  `).all(likePattern);
+
+  const updateStatement = db.prepare(`
+    UPDATE media_items
+    SET file_name = ?
+    WHERE id = ?
+  `);
+
+  const updatedPaths = [];
+
+  const updateTransaction = db.transaction(() => {
+    rows.forEach((row) => {
+      const currentPath = String(row.file_name || '');
+      const nextPath = currentPath.replace(/^[A-Za-z]:/, `${normalizedTo}:`);
+
+      if (nextPath !== currentPath) {
+        updateStatement.run(nextPath, row.id);
+        updatedPaths.push({
+          id: row.id,
+          previous_path: currentPath,
+          updated_path: nextPath,
+        });
+      }
+    });
+  });
+
+  updateTransaction();
+
+  return {
+    fromDriveLetter: normalizedFrom,
+    toDriveLetter: normalizedTo,
+    scanned: rows.length,
+    updated: updatedPaths.length,
+    updatedPaths,
+  };
 }
 
 function getOrderedMediaItemsQuery(additionalSelect = '', joinClause = '', whereClause = '') {
@@ -633,16 +689,28 @@ function removeMediaItemFromList(listId, mediaItemId) {
   `).run(listId, mediaItemId).changes;
 }
 
-function getMediaItemsForList(listId) {
-  return db.prepare(getOrderedMediaItemsQuery(
+function getMediaItemsForList(listId, limit, offset) {
+  const query = getOrderedMediaItemsQuery(
     'mli.created_at AS added_to_list_at',
     'INNER JOIN media_list_items mli ON m.id = mli.media_item_id',
     'WHERE mli.list_id = ?'
-  )).all(listId);
+  );
+  let stmt = db.prepare(query);
+  if (limit != null && offset != null) {
+    stmt = db.prepare(`${query} LIMIT ? OFFSET ?`);
+    return stmt.all(listId, limit, offset);
+  }
+  return stmt.all(listId);
 }
 
-function getAllMediaItemsOrdered() {
-  return db.prepare(getOrderedMediaItemsQuery()).all();
+function getAllMediaItemsOrdered(limit, offset) {
+  const query = getOrderedMediaItemsQuery();
+  let stmt = db.prepare(query);
+  if (limit != null && offset != null) {
+    stmt = db.prepare(`${query} LIMIT ? OFFSET ?`);
+    return stmt.all(limit, offset);
+  }
+  return stmt.all();
 }
 
 function createMediaSection(mediaItemId) {
@@ -1445,8 +1513,8 @@ ipcMain.handle('add-media-item', async (event, { name, fileName }) => {
   return getOrCreateMediaItem(fileName || name);
 });
 
-ipcMain.handle('get-media-items', async () => {
-  return getAllMediaItemsOrdered();
+ipcMain.handle('get-media-items', async (event, limit, offset) => {
+  return getAllMediaItemsOrdered(limit, offset);
 });
 
 ipcMain.handle('get-or-create-media-item', async (event, filePath) => {
@@ -1721,6 +1789,33 @@ ipcMain.handle('get-media-item-by-name', (event, name) => {
   return stmt.get(likePattern);
 });
 
+ipcMain.handle('get-media-item-by-exact-name', (event, name) => {
+  try {
+    return getMediaItemByExactName(name);
+  } catch (error) {
+    console.error('Failed to get media item by exact name:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('update-media-item-file-path', (event, { mediaItemId, filePath }) => {
+  try {
+    return updateMediaItemFilePath(mediaItemId, filePath);
+  } catch (error) {
+    console.error('Failed to update media item file path:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('update-media-item-drive-letters', (event, { fromDriveLetter, toDriveLetter }) => {
+  try {
+    return updateMediaItemDriveLetters(fromDriveLetter, toDriveLetter);
+  } catch (error) {
+    console.error('Failed to update media item drive letters:', error);
+    throw error;
+  }
+});
+
 ipcMain.handle('get-displayed-screenshot-paths', () => {
   try {
     const screenshotPaths = getDisplayedScreenshotPaths();
@@ -1832,9 +1927,9 @@ ipcMain.handle('remove-media-item-from-list', async (event, { listId, mediaItemI
   }
 });
 
-ipcMain.handle('get-media-items-for-list', async (event, listId) => {
+ipcMain.handle('get-media-items-for-list', async (event, listId, limit, offset) => {
   try {
-    return getMediaItemsForList(listId);
+    return getMediaItemsForList(listId, limit, offset);
   } catch (error) {
     console.error('Failed to load media items for list:', error);
     throw error;
@@ -2318,4 +2413,3 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   closeDatabase();
 });
-

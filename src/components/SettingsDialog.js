@@ -4,6 +4,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import IgnoredScreenshotsDialog from './IgnoredScreenshotsDialog';
 
 export default function SettingsDialog({ open, onClose, showSnackbar }) {
+  const driveLetterOptions = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
   const [settings, setSettings] = useState({
     default_screens_per_row: 3,
     screens_load_per_item: 12,
@@ -12,10 +13,14 @@ export default function SettingsDialog({ open, onClose, showSnackbar }) {
     startup_media_list: 'all',
     database_file: '',
     requested_database_file: '',
+    items_per_page: 25,
   });
   const [migrationResult, setMigrationResult] = useState(null);
   const [ignoredDialogOpen, setIgnoredDialogOpen] = useState(false);
   const [mediaLists, setMediaLists] = useState([]);
+  const [fromDriveLetter, setFromDriveLetter] = useState('E');
+  const [toDriveLetter, setToDriveLetter] = useState('T');
+  const [driveLetterUpdateResult, setDriveLetterUpdateResult] = useState(null);
 
   useEffect(() => {
     if (open) {
@@ -26,6 +31,7 @@ export default function SettingsDialog({ open, onClose, showSnackbar }) {
         setMediaLists(lists);
       });
       setMigrationResult(null);
+      setDriveLetterUpdateResult(null);
     }
   }, [open]);
 
@@ -94,6 +100,37 @@ export default function SettingsDialog({ open, onClose, showSnackbar }) {
     );
   };
 
+  const handleUpdateDriveLetters = async () => {
+    if (fromDriveLetter === toDriveLetter) {
+      showSnackbar?.('Choose different source and destination drive letters.', 'warning');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Update all media item paths that start with ${fromDriveLetter}: to use ${toDriveLetter}: instead?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const result = await window.electronAPI.updateMediaItemDriveLetters({
+        fromDriveLetter,
+        toDriveLetter,
+      });
+
+      setDriveLetterUpdateResult(result);
+      showSnackbar?.(
+        `Drive letter update complete. Updated ${result.updated} of ${result.scanned} matching media item path(s).`,
+        'success'
+      );
+    } catch (error) {
+      console.error('handleUpdateDriveLetters failed:', error);
+      showSnackbar?.(error?.message || 'Failed to update media item drive letters.', 'error');
+    }
+  };
+
   return (
     <>
       <Dialog open={open} onClose={onClose}>
@@ -132,6 +169,14 @@ export default function SettingsDialog({ open, onClose, showSnackbar }) {
               margin="dense"
               value={settings.random_images || ''}
               onChange={handleChange('random_images')}
+            />
+            <TextField
+              label="Items Per Page"
+              type="number"
+              fullWidth
+              margin="dense"
+              value={settings.items_per_page || ''}
+              onChange={handleChange('items_per_page')}
             />
             <FormControlLabel
               control={
@@ -183,6 +228,63 @@ export default function SettingsDialog({ open, onClose, showSnackbar }) {
             <Button variant="outlined" onClick={() => setIgnoredDialogOpen(true)}>
               View Ignored Random Screenshots
             </Button>
+            <Box
+              sx={{
+                border: '1px solid #ddd',
+                borderRadius: 1.5,
+                p: 2,
+                backgroundColor: '#fafafa',
+              }}
+            >
+              <Stack spacing={1.5}>
+                <Typography variant="subtitle2">
+                  Update Media Item Drive Letters
+                </Typography>
+                <Stack direction="row" spacing={1.5}>
+                  <TextField
+                    select
+                    label="From Drive"
+                    fullWidth
+                    value={fromDriveLetter}
+                    onChange={(e) => setFromDriveLetter(e.target.value)}
+                  >
+                    {driveLetterOptions.map((letter) => (
+                      <MenuItem key={`from-drive-${letter}`} value={letter}>
+                        {letter}:
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
+                    select
+                    label="To Drive"
+                    fullWidth
+                    value={toDriveLetter}
+                    onChange={(e) => setToDriveLetter(e.target.value)}
+                  >
+                    {driveLetterOptions.map((letter) => (
+                      <MenuItem key={`to-drive-${letter}`} value={letter}>
+                        {letter}:
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                </Stack>
+                <Button
+                  variant="contained"
+                  onClick={handleUpdateDriveLetters}
+                  disabled={fromDriveLetter === toDriveLetter}
+                >
+                  Update Drive Letters
+                </Button>
+                <Typography variant="body2" color="text.secondary">
+                  Example: change all media item paths from {fromDriveLetter}:\ to {toDriveLetter}:\ while keeping the rest of each path unchanged.
+                </Typography>
+                {driveLetterUpdateResult && (
+                  <Typography variant="body2" color="text.secondary">
+                    Last update: scanned {driveLetterUpdateResult.scanned}, updated {driveLetterUpdateResult.updated}.
+                  </Typography>
+                )}
+              </Stack>
+            </Box>
             <Typography variant="body2" color="text.secondary">
               If no database exists yet, select an existing SQLite database or create a new one here.
             </Typography>

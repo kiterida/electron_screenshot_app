@@ -148,6 +148,9 @@ function App() {
   const [selectedMediaListId, setSelectedMediaListId] = useState('');
   const [activeAddToListId, setActiveAddToListId] = useState('');
   const [mediaListsDialogOpen, setMediaListsDialogOpen] = useState(false);
+  const [mediaItemsOffset, setMediaItemsOffset] = useState(0);
+  const [hasMoreMediaItems, setHasMoreMediaItems] = useState(true);
+  const [loadingMoreMediaItems, setLoadingMoreMediaItems] = useState(false);
   const [listActionMessage, setListActionMessage] = useState('');
   const [snackbarState, setSnackbarState] = useState({
     open: false,
@@ -250,8 +253,43 @@ function App() {
     return sequences;
   };
 
+  const getDefaultSequenceName = async (availableSavedSequences = savedSequences) => {
+    if (selectedSavedSequenceId) {
+      const loadedSequence = availableSavedSequences.find((sequence) => Number(sequence.id) === Number(selectedSavedSequenceId));
+      if (loadedSequence?.name) {
+        return loadedSequence.name;
+      }
+      const freshSequence = await window.electronAPI.getVideoExportSequenceById(selectedSavedSequenceId);
+      if (freshSequence?.name) {
+        return freshSequence.name;
+      }
+    }
+
+    if (sequenceNameInput.trim()) {
+      return sequenceNameInput;
+    }
+
+    if (currentMediaItemId) {
+      const mediaItem = await window.electronAPI.getMediaItemById(currentMediaItemId);
+      if (mediaItem?.name) {
+        return mediaItem.name;
+      }
+      if (mediaItem?.file_name) {
+        return mediaItem.file_name;
+      }
+    }
+
+    return currentVideoName;
+  };
+
   const openSequenceSaveLoadDialog = async () => {
-    await refreshSavedSequences();
+    const availableSavedSequences = await refreshSavedSequences();
+    if (!sequenceNameInput.trim()) {
+      const defaultName = await getDefaultSequenceName(availableSavedSequences);
+      if (defaultName) {
+        setSequenceNameInput(defaultName);
+      }
+    }
     setSaveLoadDialogOpen(true);
   };
 
@@ -596,52 +634,99 @@ function App() {
     return settings;
   };
 
-  const refreshStartupMediaItems = async (settingsOverride) => {
-    const settings = settingsOverride || await window.electronAPI.getAppSettings();
-    const startupMediaList = settings.startup_media_list || 'all';
-    const startupSelectedListId =
-      typeof startupMediaList === 'string' && startupMediaList.startsWith('list:')
-        ? startupMediaList.split(':')[1] || ''
-        : '';
+  const refreshStartupMediaItems = (settingsOverride) => {
+    const settingsPromise = settingsOverride ? Promise.resolve(settingsOverride) : window.electronAPI.getAppSettings();
+    settingsPromise.then(settings => {
+      const startupMediaList = settings.startup_media_list || 'all';
+      const startupSelectedListId =
+        typeof startupMediaList === 'string' && startupMediaList.startsWith('list:')
+          ? startupMediaList.split(':')[1] || ''
+          : '';
 
-    setAppSettings(settings);
-    setScreenshotsPerRow(settings.default_screens_per_row);
-    setSelectedMediaListId(startupSelectedListId);
-    setActiveAddToListId('');
-    setMediaItemsLoading(true);
-    mediaLoadSequenceRef.current = Date.now();
-    setMediaItems([]);
+      setAppSettings(settings);
+      setScreenshotsPerRow(settings.default_screens_per_row);
+      setSelectedMediaListId(startupSelectedListId);
+      setActiveAddToListId('');
+      setMediaItemsLoading(true);
+      setMediaItemsOffset(0);
+      setHasMoreMediaItems(true);
+      mediaLoadSequenceRef.current = Date.now();
+      setMediaItems([]);
 
-    try {
-      const items = await loadStartupMediaItems(settings);
-      await loadAndEnrichMediaItems(items, settings, { progressive: true, batchSize: 8 });
-    } finally {
-      setMediaItemsLoading(false);
-    }
+      const itemsPerPage = settings.items_per_page || 25;
+      loadStartupMediaItems(settings, itemsPerPage, 0).then(items => {
+        loadAndEnrichMediaItems(items, settings, { progressive: true, batchSize: 8 }).then(() => {
+          setHasMoreMediaItems(items.length === itemsPerPage);
+          setMediaItemsLoading(false);
+        });
+      });
+    });
   };
 
-  const refreshSelectedMediaListItems = async (selectedListId, options = {}) => {
-    const settings = options.settingsOverride || await window.electronAPI.getAppSettings();
-    const showEntireLibrary = options.showEntireLibrary === true;
-    setAppSettings(settings);
-    setScreenshotsPerRow(settings.default_screens_per_row);
-    setMediaItemsLoading(true);
-    mediaLoadSequenceRef.current = Date.now();
-    setMediaItems([]);
+  const loadMoreMediaItems = () => {
+    if (!hasMoreMediaItems || loadingMoreMediaItems) {
+      return;
+    }
 
-    try {
-      let items = [];
+    setLoadingMoreMediaItems(true);
 
-      if (showEntireLibrary || !selectedListId) {
-        items = await window.electronAPI.getMediaItems();
+    window.electronAPI.getAppSettings().then(settings => {
+      const itemsPerPage = settings.items_per_page || 25;
+      const nextOffset = mediaItemsOffset + itemsPerPage;
+
+      let itemsPromise;
+
+      if (activeAddToListId === selectedMediaListId && Boolean(selectedMediaListId)) {
+        // Show entire library when adding to list
+        itemsPromise = window.electronAPI.getMediaItems(itemsPerPage, nextOffset);
+      } else if (selectedMediaListId) {
+        itemsPromise = window.electronAPI.getMediaItemsForList(selectedMediaListId, itemsPerPage, nextOffset);
       } else {
-        items = await window.electronAPI.getMediaItemsForList(selectedListId);
+        itemsPromise = window.electronAPI.getMediaItems(itemsPerPage, nextOffset);
       }
 
-      await loadAndEnrichMediaItems(items, settings, { progressive: true, batchSize: 8 });
-    } finally {
-      setMediaItemsLoading(false);
-    }
+      itemsPromise.then(items => {
+        if (items.length > 0) {
+          loadAndEnrichMediaItems(items, settings, { progressive: true, batchSize: 8 }).then(() => {
+            setMediaItemsOffset(nextOffset);
+            setHasMoreMediaItems(items.length === itemsPerPage);
+          });
+        } else {
+          setHasMoreMediaItems(false);
+        }
+
+        setLoadingMoreMediaItems(false);
+      });
+    });
+  };
+
+  const refreshSelectedMediaListItems = (selectedListId, options = {}) => {
+    const settingsPromise = options.settingsOverride ? Promise.resolve(options.settingsOverride) : window.electronAPI.getAppSettings();
+
+    settingsPromise.then(settings => {
+      const showEntireLibrary = options.showEntireLibrary === true;
+      setAppSettings(settings);
+      setScreenshotsPerRow(settings.default_screens_per_row);
+      setMediaItemsLoading(true);
+      setMediaItemsOffset(0);
+      setHasMoreMediaItems(true);
+      mediaLoadSequenceRef.current = Date.now();
+      setMediaItems([]);
+
+      const itemsPerPage = settings.items_per_page || 25;
+      let itemsPromise;
+      if (showEntireLibrary || !selectedListId) {
+        itemsPromise = window.electronAPI.getMediaItems(itemsPerPage, 0);
+      } else {
+        itemsPromise = window.electronAPI.getMediaItemsForList(selectedListId, itemsPerPage, 0);
+      }
+      itemsPromise.then(items => {
+        loadAndEnrichMediaItems(items, settings, { progressive: true, batchSize: 8 }).then(() => {
+          setHasMoreMediaItems(items.length === itemsPerPage);
+          setMediaItemsLoading(false);
+        });
+      });
+    });
   };
 
   const refreshMediaLists = async (preferredSelectedListId, preferredActiveAddToListId) => {
@@ -671,7 +756,7 @@ function App() {
   const handleSettingsChanged = async () => {
     const settings = await loadSettings();
     await refreshRandomResults();
-    await refreshStartupMediaItems(settings);
+    refreshStartupMediaItems(settings);
     setSettingsOpen(false);
   };
 
@@ -948,7 +1033,7 @@ function App() {
     }
   };
 
-  const loadStartupMediaItems = async (settings) => {
+  const loadStartupMediaItems = async (settings, limit, offset) => {
     const startupMediaList = settings.startup_media_list || 'all';
 
     if (startupMediaList === 'none') {
@@ -961,10 +1046,10 @@ function App() {
         return [];
       }
 
-      return window.electronAPI.getMediaItemsForList(listId);
+      return window.electronAPI.getMediaItemsForList(listId, limit, offset);
     }
 
-    return window.electronAPI.getMediaItems();
+    return window.electronAPI.getMediaItems(limit, offset);
   };
 
   const showMediaItemScreenshotsAtTop = async (mediaItemId) => {
@@ -1114,7 +1199,7 @@ function App() {
         if (!randomStartupComplete) {
           return;
         }
-      await refreshStartupMediaItems();
+      refreshStartupMediaItems();
     };
 
     loadApp();
@@ -1157,18 +1242,81 @@ function App() {
 
   useEffect(() => {
     window.electronAPI.onVideoSelected((path) => {
-      stopSequencePlayback();
-      setDroppedExportParentMediaItemId(null);
-      setVideoPath(path);
+      handleSelectedVideoPath(path);
     });
   }, []);
 
   const addToDatabase = async () => {
     if (!videoPath) return;
+
+    const normalizedVideoPath = videoPath.replace(/\\/g, '/');
+    const mediaName = videoPath.split(/[\\/]/).pop();
+
+    const existingMediaItemByName = await window.electronAPI.getMediaItemByExactName(mediaName);
+
+    if (existingMediaItemByName) {
+      const existingPath = String(existingMediaItemByName.file_name || '').replace(/\\/g, '/');
+
+      if (existingPath === normalizedVideoPath) {
+        setCurrentMediaItemId(existingMediaItemByName.id || null);
+        setDroppedExportParentMediaItemId(null);
+        showSnackbar('This media item is already in the database.', 'info');
+        return;
+      }
+      showSnackbar('A media item with this filename already exists. Re-select the file if you want to update its stored path.', 'warning');
+      return;
+    }
+
     const mediaItem = await window.electronAPI.getOrCreateMediaItem(videoPath);
     setCurrentMediaItemId(mediaItem?.id || null);
     setDroppedExportParentMediaItemId(null);
     showSnackbar('Media item added to database!', 'success');
+  };
+
+  const handleSelectedVideoPath = async (selectedPath) => {
+    if (!selectedPath) {
+      return;
+    }
+
+    stopSequencePlayback();
+    setDroppedExportParentMediaItemId(null);
+    setCurrentMediaItemId(null);
+
+    const normalizedSelectedPath = selectedPath.replace(/\\/g, '/');
+    const mediaName = selectedPath.split(/[\\/]/).pop();
+    const exactPathMatch = await window.electronAPI.getMediaItemByFilePath(selectedPath);
+
+    if (exactPathMatch?.id) {
+      setCurrentMediaItemId(exactPathMatch.id);
+      setVideoPath(selectedPath);
+      showSnackbar('This file is already linked to a media item in the database.', 'info');
+      return;
+    }
+
+    const existingMediaItemByName = await window.electronAPI.getMediaItemByExactName(mediaName);
+    if (existingMediaItemByName?.id) {
+      const existingPath = String(existingMediaItemByName.file_name || '').replace(/\\/g, '/');
+
+      if (existingPath !== normalizedSelectedPath) {
+        const shouldUpdatePath = window.confirm(
+          `"${mediaName}" is already in the database with a different file path.\n\nCurrent path:\n${existingMediaItemByName.file_name || '(empty)'}\n\nNew path:\n${selectedPath}\n\nDo you want to update the existing media item to use the new file path?`
+        );
+
+        if (shouldUpdatePath) {
+          const updatedMediaItem = await window.electronAPI.updateMediaItemFilePath({
+            mediaItemId: existingMediaItemByName.id,
+            filePath: selectedPath,
+          });
+
+          setCurrentMediaItemId(updatedMediaItem?.id || null);
+          setVideoPath(updatedMediaItem?.file_name || selectedPath);
+          showSnackbar('Updated the existing media item to the new file path.', 'success');
+          return;
+        }
+      }
+    }
+
+    setVideoPath(selectedPath);
   };
 
   const addMediaItemToActiveList = async (mediaItemId, mediaName = 'media item') => {
@@ -1206,9 +1354,7 @@ function App() {
   };
 
   const openMediaFile = (path) => {
-    stopSequencePlayback();
-    setDroppedExportParentMediaItemId(null);
-    setVideoPath(path);
+    handleSelectedVideoPath(path);
   };
 
   useEffect(() => {
@@ -1713,12 +1859,12 @@ function App() {
         await refreshMediaLists(currentSelectedListId, currentActiveAddToListId);
 
         if (currentSelectedListId) {
-          await refreshSelectedMediaListItems(currentSelectedListId, {
+          refreshSelectedMediaListItems(currentSelectedListId, {
             showEntireLibrary: currentActiveAddToListId === currentSelectedListId && Boolean(currentSelectedListId),
           });
         } else {
           const settings = await window.electronAPI.getAppSettings();
-          await refreshSelectedMediaListItems('', {
+          refreshSelectedMediaListItems('', {
             settingsOverride: settings,
             showEntireLibrary: true,
           });
@@ -1744,7 +1890,7 @@ function App() {
         await refreshMediaLists(data.currentListId || currentSelectedListId, currentActiveAddToListId);
 
         if (currentSelectedListId) {
-          await refreshSelectedMediaListItems(currentSelectedListId, {
+          refreshSelectedMediaListItems(currentSelectedListId, {
             showEntireLibrary: currentActiveAddToListId === currentSelectedListId && Boolean(currentSelectedListId),
           });
         }
@@ -1813,12 +1959,14 @@ function App() {
             const nextListId = e.target.value;
             setSelectedMediaListId(nextListId);
             setListActionMessage('');
+            setMediaItemsOffset(0);
+            setHasMoreMediaItems(true);
 
             if (activeAddToListId && activeAddToListId !== nextListId) {
               setActiveAddToListId('');
             }
 
-            await refreshSelectedMediaListItems(nextListId, {
+            refreshSelectedMediaListItems(nextListId, {
               showEntireLibrary: activeAddToListId === nextListId && Boolean(nextListId),
             });
           }}
@@ -1838,8 +1986,10 @@ function App() {
               const nextActiveState = activeAddToListId === selectedMediaListId ? '' : selectedMediaListId;
               setActiveAddToListId(nextActiveState);
               setListActionMessage('');
+              setMediaItemsOffset(0);
+              setHasMoreMediaItems(true);
 
-              await refreshSelectedMediaListItems(selectedMediaListId, {
+              refreshSelectedMediaListItems(selectedMediaListId, {
                 showEntireLibrary: Boolean(nextActiveState),
               });
             }}
@@ -3083,6 +3233,17 @@ function App() {
               </div>
             </div>
           ))}
+          {hasMoreMediaItems && (
+            <div style={{ padding: '16px', textAlign: 'center' }}>
+              <Button
+                variant="outlined"
+                onClick={loadMoreMediaItems}
+                disabled={loadingMoreMediaItems}
+              >
+                {loadingMoreMediaItems ? 'Loading...' : 'Load More'}
+              </Button>
+            </div>
+          )}
         </>
       )}
 
