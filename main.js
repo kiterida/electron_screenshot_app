@@ -148,6 +148,24 @@ function ensureDatabaseSchema(database) {
     )
   `).run();
 
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS exported_sequences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL UNIQUE,
+      clip_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS exported_sequence_media_items (
+      media_item_id INTEGER NOT NULL,
+      exported_sequence_id INTEGER NOT NULL,
+      PRIMARY KEY (media_item_id, exported_sequence_id),
+      FOREIGN KEY (media_item_id) REFERENCES media_items(id) ON DELETE CASCADE,
+      FOREIGN KEY (exported_sequence_id) REFERENCES exported_sequences(id) ON DELETE CASCADE
+    );
+  `);
+
   database.prepare(`
     CREATE TABLE IF NOT EXISTS video_export_sequence_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,6 +182,9 @@ function ensureDatabaseSchema(database) {
     CREATE INDEX IF NOT EXISTS idx_video_export_sequence_items_sequence_id
     ON video_export_sequence_items (sequence_id, position)
   `).run();
+  if (!database.prepare('PRAGMA table_info(video_export_sequence_items)').all().some((column) => column.name === 'playback_speed')) {
+    database.exec('ALTER TABLE video_export_sequence_items ADD COLUMN playback_speed REAL NOT NULL DEFAULT 1');
+  }
 
   database.prepare(`
     CREATE TABLE IF NOT EXISTS displayed_screenshots (
@@ -1329,6 +1350,37 @@ function getExportedVideosForMediaItem(mediaItemId) {
   `).all(mediaItemId);
 }
 
+function getExportedSequencesForMediaItem(mediaItemId) {
+  return db.prepare(`
+    SELECT s.* FROM exported_sequences s
+    INNER JOIN exported_sequence_media_items m ON m.exported_sequence_id = s.id
+    WHERE m.media_item_id = ?
+    ORDER BY s.id DESC
+  `).all(mediaItemId);
+}
+
+function deleteExportedSequence({ id, deleteFile = false } = {}) {
+  if (!Number.isSafeInteger(id) || id <= 0 || typeof deleteFile !== 'boolean') {
+    throw new Error('Invalid sequence export deletion request.');
+  }
+  const sequence = db.prepare('SELECT * FROM exported_sequences WHERE id = ?').get(id);
+  if (!sequence) return { deleted: true };
+  if (deleteFile) {
+    try {
+      fs.unlinkSync(sequence.file_path);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw new Error(`Could not delete the video file. The database entry was kept. ${error.message}`);
+      }
+    }
+  }
+  db.transaction(() => {
+    db.prepare('DELETE FROM exported_sequence_media_items WHERE exported_sequence_id = ?').run(id);
+    db.prepare('DELETE FROM exported_sequences WHERE id = ?').run(id);
+  })();
+  return { deleted: true };
+}
+
 function getVideoExportSequences() {
   return db.prepare(`
     SELECT
@@ -1359,6 +1411,7 @@ function getVideoExportSequenceById(sequenceId) {
   const items = db.prepare(`
     SELECT
       i.position,
+      i.playback_speed,
       v.*
     FROM video_export_sequence_items i
     INNER JOIN exported_videos v
@@ -1373,7 +1426,7 @@ function getVideoExportSequenceById(sequenceId) {
   };
 }
 
-function saveVideoExportSequence({ sequenceId = null, name, exportedVideoIds }) {
+function saveVideoExportSequence({ sequenceId = null, name, exportedVideoIds, playbackSpeeds }) {
   const trimmedName = String(name || '').trim();
   const normalizedIds = Array.isArray(exportedVideoIds)
     ? exportedVideoIds.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
@@ -1386,6 +1439,8 @@ function saveVideoExportSequence({ sequenceId = null, name, exportedVideoIds }) 
   if (normalizedIds.length === 0) {
     throw new Error('A sequence must contain at least one exported video.');
   }
+  if (normalizedIds.length !== exportedVideoIds.length) throw new Error('Invalid sequence clip IDs.');
+  const speeds = normalizeSequenceSpeeds(playbackSpeeds, normalizedIds.length);
 
   const saveTransaction = db.transaction(() => {
     let resolvedSequenceId = sequenceId ? Number(sequenceId) : null;
@@ -1445,8 +1500,8 @@ function saveVideoExportSequence({ sequenceId = null, name, exportedVideoIds }) 
     `).run(resolvedSequenceId);
 
     const insertItem = db.prepare(`
-      INSERT INTO video_export_sequence_items (sequence_id, position, exported_video_id)
-      VALUES (?, ?, ?)
+      INSERT INTO video_export_sequence_items (sequence_id, position, exported_video_id, playback_speed)
+      VALUES (?, ?, ?, ?)
     `);
 
     normalizedIds.forEach((exportedVideoId, index) => {
@@ -1460,7 +1515,7 @@ function saveVideoExportSequence({ sequenceId = null, name, exportedVideoIds }) 
         throw new Error(`Exported video ${exportedVideoId} could not be found.`);
       }
 
-      insertItem.run(resolvedSequenceId, index, exportedVideoId);
+      insertItem.run(resolvedSequenceId, index, exportedVideoId, speeds[index]);
     });
 
     return getVideoExportSequenceById(resolvedSequenceId);
@@ -2350,6 +2405,183 @@ async function exportVideoRange({ inputPath, mediaItemId, startSeconds, endSecon
     exportedVideo,
   };
 }
+
+function runSequenceTool(executable, args, onProgress) {
+  return new Promise((resolve, reject) => {
+    let stalled = false;
+    let watchdog;
+    let lastOutputTime = -1;
+    let pending = '';
+    const toolArgs = onProgress ? ['-progress', 'pipe:1', '-nostats', ...args] : args;
+    const child = execFile(executable, toolArgs, { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+      clearTimeout(watchdog);
+      if (stalled) {
+        reject(new Error('Sequence export stopped because no progress was made for 3 minutes. Please retry; check that the source files and export drive are accessible.'));
+        return;
+      }
+      if (error) {
+        reject(new Error(stderr || error.message));
+      } else {
+        resolve(stdout);
+      }
+    });
+    const resetWatchdog = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => { stalled = true; child.kill(); }, 180000);
+    };
+    resetWatchdog();
+    if (onProgress) child.stdout.on('data', (chunk) => {
+      pending += chunk.toString();
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('out_time_us=')) continue;
+        const outputTime = Number(line.slice('out_time_us='.length));
+        if (Number.isFinite(outputTime) && outputTime > lastOutputTime) {
+          lastOutputTime = outputTime;
+          resetWatchdog();
+          onProgress(outputTime / 1000000);
+        }
+      }
+    });
+  });
+}
+
+function normalizeSequenceSpeeds(speeds, count) {
+  if (speeds === undefined) return Array(count).fill(1);
+  if (!Array.isArray(speeds) || speeds.length !== count || speeds.some((speed) => typeof speed !== 'number' || !Number.isFinite(speed) || speed < 0.2 || speed > 2)) {
+    throw new Error('Each slot speed must be between 20% and 200%.');
+  }
+  return speeds;
+}
+
+function sequenceAudioTempo(speed) {
+  const filters = [];
+  while (speed < 0.5) {
+    filters.push('atempo=0.5');
+    speed /= 0.5;
+  }
+  filters.push(`atempo=${speed}`);
+  return filters.join(',');
+}
+
+async function exportVideoSequence({ exportedVideoIds, name, playbackSpeeds } = {}, reportProgress = () => {}) {
+  if (!Array.isArray(exportedVideoIds) || exportedVideoIds.length === 0) {
+    throw new Error('Add clips to the sequence before exporting.');
+  }
+  const lookup = db.prepare('SELECT * FROM exported_videos WHERE id = ?');
+  const speeds = normalizeSequenceSpeeds(playbackSpeeds, exportedVideoIds.length);
+  const clips = exportedVideoIds.map((id) => {
+    const clip = Number.isSafeInteger(id) ? lookup.get(id) : null;
+    if (!clip || !fs.existsSync(clip.file_path)) {
+      throw new Error('A sequence clip is missing. Check that all exported videos still exist.');
+    }
+    return clip;
+  });
+  // Clip exports live in screenshot-app/video_exports, including saved sequences.
+  const screenshotFolder = getSetting('screenshot_folder') || path.dirname(path.dirname(clips[0].file_path));
+  const exportFolder = path.join(screenshotFolder, 'exported_sequences');
+  fs.mkdirSync(exportFolder, { recursive: true });
+  const safeName = String(name || 'Sequence').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/g, '').slice(0, 100) || 'Sequence';
+  const baseName = `Sequence_${safeName}_${Date.now()}`;
+  const tempFolder = fs.mkdtempSync(path.join(exportFolder, '.sequence-'));
+  const temporaryFiles = [];
+  try {
+    const ffprobe = path.join(path.dirname(ffmpegExecutable), 'ffprobe.exe');
+    let dimensions;
+    for (let index = 0; index < clips.length; index += 1) {
+      reportProgress({ stage: 'clip', clip: index + 1, total: clips.length, percent: 0 });
+      const metadata = JSON.parse(await runSequenceTool(ffprobe, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', clips[index].file_path]));
+      const video = metadata.streams.find((stream) => stream.codec_type === 'video');
+      if (!video) throw new Error(`Clip ${index + 1} has no video stream.`);
+      const duration = Number(video.duration || metadata.format?.duration);
+      if (!Number.isFinite(duration) || duration <= 0) throw new Error(`Cannot determine the duration of clip ${index + 1}.`);
+      if (!dimensions) dimensions = [Math.ceil(video.width / 2) * 2, Math.ceil(video.height / 2) * 2];
+      const hasAudio = metadata.streams.some((stream) => stream.codec_type === 'audio');
+      const normalizedPath = path.join(tempFolder, `${index}.mp4`);
+      temporaryFiles.push(normalizedPath);
+      const [width, height] = dimensions;
+      const speed = speeds[index];
+      const outputDuration = duration / speed;
+      const videoOnlyPath = path.join(tempFolder, `${index}-video.mp4`);
+      const audioOnlyPath = path.join(tempFolder, `${index}-audio.m4a`);
+      temporaryFiles.push(videoOnlyPath, audioOnlyPath);
+      // Process streams separately: simultaneous time stretching can stall FFmpeg
+      // on some source files while its audio/video queues wait on each other.
+      await runSequenceTool(ffmpegExecutable, [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i', clips[index].file_path,
+        '-map', '0:v:0', '-an',
+        '-vf', `setpts=(PTS-STARTPTS)/${speed},scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration=${1 / speed},trim=duration=${outputDuration}`,
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p',
+        '-t', String(outputDuration), videoOnlyPath,
+      ], (seconds) => reportProgress({ stage: 'clip', clip: index + 1, total: clips.length, percent: Math.min(90, Math.round(seconds / outputDuration * 90)) }));
+      await runSequenceTool(ffmpegExecutable, [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
+        ...(hasAudio ? ['-i', clips[index].file_path] : ['-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${outputDuration}`]),
+        '-map', '0:a:0', '-vn',
+        '-c:a', 'aac', '-ar', '48000', '-ac', '2', '-af', `asetpts=PTS-STARTPTS,${hasAudio ? sequenceAudioTempo(speed) + ',' : ''}apad=whole_dur=${outputDuration},atrim=duration=${outputDuration}`,
+        '-t', String(outputDuration), audioOnlyPath,
+      ], (seconds) => reportProgress({ stage: 'clip', clip: index + 1, total: clips.length, percent: Math.min(99, 90 + Math.round(seconds / outputDuration * 9)) }));
+      await runSequenceTool(ffmpegExecutable, [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-i', videoOnlyPath, '-i', audioOnlyPath,
+        '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', normalizedPath,
+      ], () => {});
+      reportProgress({ stage: 'clip', clip: index + 1, total: clips.length, percent: 100 });
+    }
+    const manifest = path.join(tempFolder, 'clips.ffconcat');
+    temporaryFiles.push(manifest);
+    fs.writeFileSync(manifest, 'ffconcat version 1.0\n' + clips.map((_clip, index) => `file '${index}.mp4'`).join('\n'));
+    const combinedPath = path.join(tempFolder, 'combined.mp4');
+    temporaryFiles.push(combinedPath);
+    reportProgress({ stage: 'joining' });
+    await runSequenceTool(ffmpegExecutable, [
+      '-hide_banner', '-loglevel', 'error', '-nostdin', '-n', '-f', 'concat', '-safe', '1', '-i', manifest,
+      '-c', 'copy', '-movflags', '+faststart', combinedPath,
+    ], () => {});
+    let outputPath = path.join(exportFolder, `${baseName}.mp4`);
+    reportProgress({ stage: 'saving' });
+    let suffix = 2;
+    while (true) {
+      try {
+        fs.copyFileSync(combinedPath, outputPath, fs.constants.COPYFILE_EXCL);
+        break;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        outputPath = path.join(exportFolder, `${baseName}_${suffix++}.mp4`);
+      }
+    }
+    let exportedSequence;
+    try {
+      exportedSequence = db.transaction(() => {
+        const result = db.prepare(`
+          INSERT INTO exported_sequences (name, file_name, file_path, clip_count)
+          VALUES (?, ?, ?, ?)
+        `).run(String(name || 'Sequence'), path.basename(outputPath), outputPath, clips.length);
+        const id = Number(result.lastInsertRowid);
+        const link = db.prepare('INSERT INTO exported_sequence_media_items (media_item_id, exported_sequence_id) VALUES (?, ?)');
+        for (const mediaItemId of new Set(clips.map((clip) => clip.media_item_id))) {
+          link.run(mediaItemId, id);
+        }
+        return db.prepare('SELECT * FROM exported_sequences WHERE id = ?').get(id);
+      })();
+    } catch (error) {
+      fs.unlinkSync(outputPath);
+      throw error;
+    }
+    return { outputPath, exportedSequence };
+  } finally {
+    for (const file of temporaryFiles) {
+      try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') console.warn('Sequence cleanup failed:', error); }
+    }
+    try { fs.rmdirSync(tempFolder); } catch (error) { console.warn('Sequence folder cleanup failed:', error); }
+  }
+}
+
+ipcMain.handle('export-video-sequence', (event, payload) => exportVideoSequence(payload, (progress) => {
+  if (!event.sender.isDestroyed()) event.sender.send('sequence-export-progress', progress);
+}));
+ipcMain.handle('get-exported-sequences-for-media-item', (_event, mediaItemId) => getExportedSequencesForMediaItem(mediaItemId));
+ipcMain.handle('delete-exported-sequence', (_event, payload) => deleteExportedSequence(payload));
 
 ipcMain.on('open-settings-window', () => {
   openSettingsWindow();

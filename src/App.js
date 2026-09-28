@@ -32,6 +32,7 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import CloseIcon from '@mui/icons-material/Close';
 import FirstPageIcon from '@mui/icons-material/FirstPage';
+import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
 import InputIcon from '@mui/icons-material/Input';
 import LastPageIcon from '@mui/icons-material/LastPage';
 import LibraryAddOutlinedIcon from '@mui/icons-material/LibraryAddOutlined';
@@ -90,6 +91,10 @@ function App() {
   const [videoPath, setVideoPath] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
   const [exportedVideos, setExportedVideos] = useState([]);
+  const [exportedSequences, setExportedSequences] = useState([]);
+  const [deletingSequenceExportId, setDeletingSequenceExportId] = useState(null);
+  const [sequenceExportsRefresh, setSequenceExportsRefresh] = useState(0);
+  const [sequenceExportsError, setSequenceExportsError] = useState('');
   const [mediaItems, setMediaItems] = useState([]);
   const [hoveredScreenshot, setHoveredScreenshot] = useState(null);
   const [showItemName, setShowItemName] = useState(false);
@@ -134,6 +139,9 @@ function App() {
   const [isBuildSequenceMode, setIsBuildSequenceMode] = useState(false);
   const [isSequenceBuilderMinimized, setIsSequenceBuilderMinimized] = useState(false);
   const [sequenceClips, setSequenceClips] = useState([]);
+  const [isExportingSequence, setIsExportingSequence] = useState(false);
+  const [sequenceExportProgress, setSequenceExportProgress] = useState(null);
+  useEffect(() => window.electronAPI.onSequenceExportProgress(setSequenceExportProgress), []);
   const [saveLoadDialogOpen, setSaveLoadDialogOpen] = useState(false);
   const [savedSequences, setSavedSequences] = useState([]);
   const [sequenceNameInput, setSequenceNameInput] = useState('');
@@ -142,6 +150,7 @@ function App() {
   const [selectedSequenceSlomoRate, setSelectedSequenceSlomoRate] = useState(0.5);
   const [activeSequencePlaybackRate, setActiveSequencePlaybackRate] = useState(1);
   const [slomoMenuAnchorEl, setSlomoMenuAnchorEl] = useState(null);
+  const [slotSpeedMenu, setSlotSpeedMenu] = useState(null);
   const [isPlayerDropActive, setIsPlayerDropActive] = useState(false);
   const [droppedExportParentMediaItemId, setDroppedExportParentMediaItemId] = useState(null);
   const [mediaLists, setMediaLists] = useState([]);
@@ -184,6 +193,14 @@ function App() {
   const sequenceDisplaySlotCount = getSequenceDisplaySlotCount(sequenceClips);
   const slomoMenuOpen = Boolean(slomoMenuAnchorEl);
   const slomoRateOptions = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+  const slotSpeedOptions = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.25, 1.5, 2];
+  const currentSlotSpeed = sequenceClips[sequencePlaybackIndex]?.playback_speed ?? 1;
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = isSequencePlaybackActive ? currentSlotSpeed * activeSequencePlaybackRate : 1;
+    }
+  }, [currentSlotSpeed, activeSequencePlaybackRate, isSequencePlaybackActive]);
 
   useEffect(() => {
     selectedMediaListIdRef.current = selectedMediaListId;
@@ -324,6 +341,65 @@ function App() {
     setIsSequenceBuilderMinimized(false);
   };
 
+  const loadAllExportsIntoSequence = () => {
+    if (exportedVideos.length === 0) {
+      return;
+    }
+
+    stopSequencePlayback();
+    setSequenceClips([...exportedVideos]);
+    setSequenceNameInput('');
+    setSelectedSavedSequenceId(null);
+    setIsSequenceBuilderMinimized(false);
+    showSnackbar(`Loaded ${exportedVideos.length} exported clip${exportedVideos.length === 1 ? '' : 's'} into the sequence.`, 'success');
+  };
+
+  const exportCurrentSequence = async () => {
+    if (isExportingSequence || sequenceClips.length === 0) return;
+    setIsExportingSequence(true);
+    setSequenceExportProgress(null);
+    try {
+      const result = await window.electronAPI.exportVideoSequence({
+        exportedVideoIds: sequenceClips.map((clip) => clip.id),
+        playbackSpeeds: sequenceClips.map((clip) => clip.playback_speed ?? 1),
+        name: sequenceNameInput.trim() || currentVideoName || 'Sequence',
+      });
+      showSnackbar(`Sequence exported to ${result.outputPath}`, 'success');
+      setSequenceExportsRefresh((value) => value + 1);
+    } catch (error) {
+      console.error('Sequence export failed:', error);
+      showSnackbar(error?.message || 'Failed to export the sequence.', 'error');
+    } finally {
+      setIsExportingSequence(false);
+    }
+  };
+
+  const deleteSequenceExport = async (sequence, deleteFile) => {
+    if (deletingSequenceExportId !== null) return;
+    setDeletingSequenceExportId(sequence.id);
+    // Release the preview's file handle before asking Windows to delete it.
+    const preview = document.getElementById(`sequence-export-preview-${sequence.id}`);
+    if (preview && deleteFile) {
+      preview.pause();
+      preview.removeAttribute('src');
+      preview.load();
+    }
+    try {
+      await window.electronAPI.deleteExportedSequence({ id: sequence.id, deleteFile });
+      setExportedSequences((rows) => rows.filter((row) => row.id !== sequence.id));
+      setSequenceExportsRefresh((value) => value + 1);
+      showSnackbar(deleteFile ? 'Sequence export link and file deleted.' : 'Sequence export link deleted. The file was kept.', 'success');
+    } catch (error) {
+      if (preview && deleteFile) {
+        preview.src = `file://${sequence.file_path}`;
+        preview.load();
+      }
+      showSnackbar(error?.message || 'Could not delete the sequence export.', 'error');
+    } finally {
+      setDeletingSequenceExportId(null);
+    }
+  };
+
   const closeSequenceBuilder = () => {
     setIsBuildSequenceMode(false);
     setIsSequenceBuilderMinimized(false);
@@ -344,6 +420,7 @@ function App() {
 
     sequenceAutoPlayPendingRef.current = true;
     setIsSequenceBuilderMinimized(true);
+    setActiveSequencePlaybackRate(1);
     setSequencePlaybackIndex(0);
     setCurrentVideoTime(0);
   };
@@ -353,7 +430,7 @@ function App() {
     setActiveSequencePlaybackRate(normalizedRate);
 
     if (videoRef.current) {
-      videoRef.current.playbackRate = normalizedRate;
+      videoRef.current.playbackRate = normalizedRate * currentSlotSpeed;
     }
   };
 
@@ -462,6 +539,7 @@ function App() {
         sequenceId: selectedSavedSequenceId,
         name: trimmedName,
         exportedVideoIds: sequenceClips.map((clip) => clip.id),
+        playbackSpeeds: sequenceClips.map((clip) => clip.playback_speed ?? 1),
       });
 
       setSelectedSavedSequenceId(savedSequence?.id || null);
@@ -1358,6 +1436,21 @@ function App() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+    setExportedSequences([]);
+    setSequenceExportsError('');
+    if (currentMediaItemId) {
+      window.electronAPI.getExportedSequencesForMediaItem(currentMediaItemId)
+        .then((rows) => { if (!cancelled) setExportedSequences(rows); })
+        .catch((error) => {
+          console.error('Failed to load sequence exports:', error);
+          if (!cancelled) setSequenceExportsError('Could not load sequence exports.');
+        });
+    }
+    return () => { cancelled = true; };
+  }, [currentMediaItemId, sequenceExportsRefresh]);
+
+  useEffect(() => {
     if (videoPath) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -2139,13 +2232,14 @@ function App() {
             >
               <video
                 ref={videoRef}
+                key={isSequencePlaybackActive ? `sequence-${sequencePlaybackIndex}-${playerSourcePath}` : playerSourcePath}
                 src={`file://${playerSourcePath}`}
                 controls
                 muted={isMuted}
                 onTimeUpdate={(e) => setCurrentVideoTime(e.currentTarget.currentTime)}
                 onLoadedMetadata={(e) => {
                   setCurrentVideoTime(e.currentTarget.currentTime || 0);
-                  e.currentTarget.playbackRate = isSequencePlaybackActive ? activeSequencePlaybackRate : 1;
+                  e.currentTarget.playbackRate = isSequencePlaybackActive ? currentSlotSpeed * activeSequencePlaybackRate : 1;
 
                   if (sequenceAutoPlayPendingRef.current) {
                     sequenceAutoPlayPendingRef.current = false;
@@ -2381,8 +2475,45 @@ function App() {
                 >
                   <Tab value="screenshots" label={`Screenshots (${screenshots.length})`} />
                   <Tab value="exports" label={`Video Exports (${exportedVideos.length})`} />
+                  <Tab value="sequence-exports" label={`Sequence Exports (${exportedSequences.length})`} />
                 </Tabs>
                 <Box sx={{ p: 1.25 }}>
+                  {mediaDetailTab === 'sequence-exports' && (
+                    <>
+                      <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1.25 }}>
+                        Sequence Exports
+                      </Typography>
+                      {sequenceExportsError ? <Alert severity="error">{sequenceExportsError}</Alert> : exportedSequences.length === 0 ? (
+                        <Typography variant="body2" color="text.secondary">No exported sequences yet.</Typography>
+                      ) : (
+                        <Box sx={{ maxHeight: '60vh', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 1.5 }}>
+                          {exportedSequences.map((sequence) => (
+                            <Paper key={sequence.id} variant="outlined" sx={{ overflow: 'hidden', borderRadius: 2 }}>
+                              <video id={`sequence-export-preview-${sequence.id}`} src={`file://${sequence.file_path}`} controls preload="metadata" style={{ width: '100%', aspectRatio: '16 / 9', background: '#000' }} />
+                              <Box sx={{ p: 1.25 }}>
+                                <Typography variant="subtitle2" sx={{ overflowWrap: 'anywhere' }}>{sequence.name}</Typography>
+                                <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>{sequence.file_name}</Typography>
+                                <Typography variant="caption" color="text.secondary" display="block">
+                                  {sequence.clip_count} clips · {new Date(sequence.created_at.replace(' ', 'T') + 'Z').toLocaleString()}
+                                </Typography>
+                                <Button size="small" startIcon={<FolderOpenOutlinedIcon />} onClick={() => window.electronAPI.openFileLocation(sequence.file_path)} sx={{ mt: 1 }}>
+                                  Open in Explorer
+                                </Button>
+                                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
+                                  <Button size="small" color="error" disabled={deletingSequenceExportId !== null} onClick={() => deleteSequenceExport(sequence, false)} title="Delete this export's database entry; keep the video file">
+                                    Delete link
+                                  </Button>
+                                  <Button size="small" color="error" variant="outlined" disabled={deletingSequenceExportId !== null} onClick={() => deleteSequenceExport(sequence, true)} title="Delete this export's database entry and permanently delete its video file">
+                                    Delete link and Delete file
+                                  </Button>
+                                </Stack>
+                              </Box>
+                            </Paper>
+                          ))}
+                        </Box>
+                      )}
+                    </>
+                  )}
                   {mediaDetailTab === 'screenshots' && (
                     <>
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.25 }}>
@@ -2433,6 +2564,15 @@ function App() {
                           </Typography>
                         </Box>
                         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ width: { xs: '100%', sm: 'auto' }, alignItems: { xs: 'stretch', sm: 'center' } }}>
+                          <Button
+                            variant="outlined"
+                            startIcon={<FolderOpenOutlinedIcon />}
+                            disabled={!exportedVideos[0]?.file_path}
+                            onClick={() => window.electronAPI.openFileLocation(exportedVideos[0].file_path)}
+                            title="Open the export folder and select the first exported video"
+                          >
+                            Open in Explorer
+                          </Button>
                           <Button
                             variant={isBuildSequenceMode ? 'contained' : 'outlined'}
                             color="secondary"
@@ -2622,8 +2762,29 @@ function App() {
                   <Button variant="contained" onClick={playSequenceFromStart} disabled={sequenceClips.length === 0}>
                     Play Sequence
                   </Button>
+                  <Button
+                    variant="outlined"
+                    onClick={loadAllExportsIntoSequence}
+                    disabled={exportedVideos.length === 0}
+                    title="Replace the sequence with all exports from this media item in their displayed order"
+                  >
+                    Load All Exports
+                  </Button>
                   <Button variant="outlined" onClick={openSequenceSaveLoadDialog}>
                     Save/Load
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    startIcon={<SaveAltIcon />}
+                    onClick={exportCurrentSequence}
+                    disabled={isExportingSequence || sequenceClips.length === 0}
+                  >
+                    {isExportingSequence
+                      ? sequenceExportProgress?.stage === 'clip'
+                        ? `Exporting ${sequenceExportProgress.clip}/${sequenceExportProgress.total} · ${sequenceExportProgress.percent}%`
+                        : sequenceExportProgress?.stage === 'joining' ? 'Joining clips…'
+                          : sequenceExportProgress?.stage === 'saving' ? 'Saving video…' : 'Preparing export…'
+                      : 'Export Sequence'}
                   </Button>
                   <Button variant="text" color="inherit" onClick={() => setIsSequenceBuilderMinimized(true)} disabled={sequenceClips.length === 0}>
                     Minimize
@@ -2644,6 +2805,11 @@ function App() {
                 return (
                   <Box
                     key={`sequence-slot-${slotIndex}`}
+                    onContextMenu={(event) => {
+                      if (!clip) return;
+                      event.preventDefault();
+                      setSlotSpeedMenu({ index: slotIndex, left: event.clientX, top: event.clientY });
+                    }}
                     onDragOver={(event) => {
                       event.preventDefault();
                       event.dataTransfer.dropEffect = 'copy';
@@ -2668,6 +2834,7 @@ function App() {
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', px: 1, py: 0.75, borderBottom: '1px solid rgba(148, 163, 184, 0.18)' }}>
                       <Typography variant="caption" sx={{ fontWeight: 700, color: '#334155' }}>
                         Slot {slotIndex + 1}
+                        {clip ? ` · ${Math.round((clip.playback_speed ?? 1) * 100)}% speed` : ''}
                       </Typography>
                       {clip && (
                         <Button
@@ -2685,6 +2852,8 @@ function App() {
                       <Box>
                         <video
                           src={`file://${clip.file_path}`}
+                          ref={(element) => { if (element) element.playbackRate = clip.playback_speed ?? 1; }}
+                          onLoadedMetadata={(event) => { event.currentTarget.playbackRate = clip.playback_speed ?? 1; }}
                           controls
                           muted
                           defaultMuted
@@ -2716,6 +2885,29 @@ function App() {
           )}
         </Paper>
       )}
+
+      <Menu
+        open={Boolean(slotSpeedMenu)}
+        onClose={() => setSlotSpeedMenu(null)}
+        anchorReference="anchorPosition"
+        anchorPosition={slotSpeedMenu ? { top: slotSpeedMenu.top, left: slotSpeedMenu.left } : undefined}
+        sx={{ zIndex: 1700 }}
+      >
+        <MenuItem disabled>Slot {(slotSpeedMenu?.index ?? 0) + 1} playback speed</MenuItem>
+        {slotSpeedOptions.map((speed) => (
+          <MenuItem
+            key={speed}
+            selected={(sequenceClips[slotSpeedMenu?.index]?.playback_speed ?? 1) === speed}
+            onClick={() => {
+              const index = slotSpeedMenu.index;
+              setSequenceClips((clips) => clips.map((clip, slotIndex) => slotIndex === index ? { ...clip, playback_speed: speed } : clip));
+              setSlotSpeedMenu(null);
+            }}
+          >
+            {Math.round(speed * 100)}%{speed === 1 ? ' (Normal)' : ''}
+          </MenuItem>
+        ))}
+      </Menu>
 
       <Dialog
         open={saveLoadDialogOpen}

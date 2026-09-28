@@ -40,6 +40,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setVideoPlayerVisibility: (isVisible) => ipcRenderer.send('set-video-player-visibility', isVisible),
   onVideoPlayerVisibilityChanged: (callback) => ipcRenderer.on('video-player-visibility-changed', (event, isVisible) => callback(isVisible)),
   exportVideoRange: (payload) => ipcRenderer.invoke('export-video-range', payload),
+  exportVideoSequence: (payload) => ipcRenderer.invoke('export-video-sequence', payload),
+  onSequenceExportProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('sequence-export-progress', listener);
+    return () => ipcRenderer.removeListener('sequence-export-progress', listener);
+  },
+  getExportedSequencesForMediaItem: (mediaItemId) => ipcRenderer.invoke('get-exported-sequences-for-media-item', mediaItemId),
+  deleteExportedSequence: (payload) => ipcRenderer.invoke('delete-exported-sequence', payload),
   openMediaTable: () => ipcRenderer.send('open-media-table'),
    getAppSettings: () => ipcRenderer.invoke('get-app-settings'),
   updateAppSetting: (key, value) => ipcRenderer.send('update-app-setting', { key, value }),
